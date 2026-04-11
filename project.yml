@@ -1,0 +1,55 @@
+name: EBookReader
+options:
+  bundleIdPrefix: com.lucadeblasis
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "16.4"
+  minimumXcodeGenVersion: "2.40"
+
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: "7.0.0"
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation
+    from: "0.9.19"
+
+targets:
+  EBookReader:
+    type: application
+    platform: macOS
+    sources:
+      - path: EBookReader
+        excludes:
+          - "**/*.entitlements"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lucadeblasis.EBookReader
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.9"
+        MACOSX_DEPLOYMENT_TARGET: "15.0"
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2024 Luca De Blasis. All rights reserved."
+        INFOPLIST_KEY_CFBundleDisplayName: "Luca's Ebook Reader"
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_ENTITLEMENTS: EBookReader/Resources/EBookReader.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_STRICT_CONCURRENCY: complete
+    dependencies:
+      - package: GRDB
+      - package: ZIPFoundation
+
+  EBookReaderTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lucadeblasis.EBookReaderTests
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: EBookReader
+      - package: GRDB
