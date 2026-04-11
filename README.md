@@ -54,15 +54,38 @@ Third-party C libraries bundled in the project:
 - **libmobi** — Mobi/AZW3 parsing
 - **chmlib** — CHM parsing and content serving
 
-## Building
+## Installation
 
+Download the latest DMG from [Releases](https://github.com/ldeblasis13/eBookReader/releases), open it, and drag EBookReader to your Applications folder.
+
+On first launch, right-click the app → **Open** (macOS requires this for apps outside the App Store).
+
+## Building from Source
+
+Requires Xcode 15+ (for the macOS SDK and Swift toolchain).
+
+**From the terminal (no need to open Xcode):**
+```bash
+git clone git@github.com:ldeblasis13/eBookReader.git
+cd eBookReader
+
+# Build the app
+make build
+
+# Or build and install directly to /Applications
+make install
+
+# Or build a distributable DMG
+make dmg
+```
+
+**From Xcode:**
 ```bash
 git clone git@github.com:ldeblasis13/eBookReader.git
 cd eBookReader
 open EBookReader.xcodeproj
 ```
-
-Xcode will resolve Swift Package Manager dependencies automatically. Build and run with Cmd+R.
+Build and run with Cmd+R. SPM dependencies resolve automatically.
 
 ## Architecture
 
