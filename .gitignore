@@ -44,3 +44,8 @@ project.xcworkspace/xcuserdata/
 # Sensitive / local
 *.env
 *.pem
+
+# Build artifacts
+*.dmg
+*.app
+*.zip
