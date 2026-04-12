@@ -208,14 +208,29 @@ actor FullTextSearchManager {
         return results.values.sorted { $0.rank > $1.rank }
     }
 
+    private static let stopWords: Set<String> = [
+        "find", "me", "the", "a", "an", "is", "are", "was", "were", "be", "been",
+        "and", "or", "not", "for", "with", "from", "to", "in", "on", "at", "of",
+        "i", "my", "we", "you", "it", "its", "this", "that", "some", "any", "all",
+        "want", "need", "give", "show", "get", "make", "have", "has", "do", "does",
+        "can", "could", "would", "should", "will", "about", "what", "how", "which",
+        "like", "please", "just", "very", "really", "also", "so", "but", "if", "then"
+    ]
+
     private func buildFTSQuery(_ input: String) -> String {
-        // Split into words and join with implicit AND
         let words = input.components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
+            .map { $0.lowercased() }
+            .filter { !$0.isEmpty && !Self.stopWords.contains($0) }
+            .filter { $0.count > 1 } // skip single characters and numbers
+            .filter { !$0.allSatisfy(\.isNumber) } // skip pure numbers like "5", "10"
             .map { word -> String in
                 let escaped = word.replacingOccurrences(of: "\"", with: "\"\"")
-                return escaped.contains(" ") ? "\"\(escaped)\"" : "\(escaped)*"
+                return "\(escaped)*"
             }
-        return words.joined(separator: " ")
+
+        guard !words.isEmpty else { return input }
+
+        // Use OR so any matching word returns results (more recall)
+        return words.joined(separator: " OR ")
     }
 }

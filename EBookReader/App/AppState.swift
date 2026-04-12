@@ -986,12 +986,15 @@ final class AppState {
         chatSession.isGenerating = true
 
         // Scope books by sidebar selection
-        let scopedBooks: [Book]
+        var scopedBooks: [Book]
         switch sidebarSelection {
         case .collection(let collectionId):
+            // Refresh collection book IDs in case they're stale
+            await loadCollectionBooks(collectionId)
             scopedBooks = books.filter { book in
                 collectionBookIDs.contains(book.id)
             }
+            logger.info("Chat scoped to collection: \(scopedBooks.count) books (collectionBookIDs: \(self.collectionBookIDs.count))")
         case .watchedFolder(let folderId):
             if let folder = watchedFolders.first(where: { $0.id == folderId }) {
                 let folderPath = folder.path
@@ -1000,6 +1003,12 @@ final class AppState {
                 scopedBooks = books
             }
         default:
+            scopedBooks = books
+        }
+
+        // Fallback: if scoped search would have zero books, use all books
+        if scopedBooks.isEmpty {
+            logger.warning("Scoped books empty, falling back to all \(self.books.count) books")
             scopedBooks = books
         }
 
