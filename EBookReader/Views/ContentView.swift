@@ -8,21 +8,37 @@ struct ContentView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 300)
         } detail: {
-            VStack(spacing: 0) {
-                // Tab bar is always visible when tabs are open
-                if !appState.openTabs.isEmpty {
-                    tabBar
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    // Tab bar with chat toggle
+                    HStack(spacing: 0) {
+                        if !appState.openTabs.isEmpty {
+                            tabBar
+                        }
+                        Spacer()
+                        chatToggleButton
+                    }
+                    .frame(height: 32)
+                    .background(.bar)
                     Divider()
-                }
 
-                // Content: library or reader
-                if let activeTab = appState.activeTab,
-                   let book = appState.books.first(where: { $0.id == activeTab.bookID }) {
-                    BookReaderView(book: book)
-                        .id(activeTab.id)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    LibraryView()
+                    // Content: library or reader
+                    if let activeTab = appState.activeTab,
+                       let book = appState.books.first(where: { $0.id == activeTab.bookID }) {
+                        BookReaderView(book: book)
+                            .id(activeTab.id)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        LibraryView()
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(1)
+
+                // Chat panel
+                if appState.showChatPanel {
+                    Divider()
+                    ChatPanelView()
                 }
             }
         }
@@ -69,8 +85,25 @@ struct ContentView: View {
             }
             .padding(.horizontal, 4)
         }
-        .frame(height: 32)
-        .background(.bar)
+    }
+
+    // MARK: - Chat Toggle
+
+    private var chatToggleButton: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                appState.showChatPanel.toggle()
+            }
+        } label: {
+            Image(systemName: appState.showChatPanel ? "sparkles" : "sparkles")
+                .font(.system(size: 12))
+                .foregroundStyle(appState.showChatPanel ? Color.accentColor : .secondary)
+                .frame(width: 32, height: 32)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("AI Chat")
+        .padding(.trailing, 8)
     }
 
     // MARK: - Drop handling

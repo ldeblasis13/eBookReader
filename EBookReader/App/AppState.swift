@@ -107,6 +107,11 @@ final class AppState {
     var isEmbeddingIndexing: Bool = false
     var embeddingIndexingProgress: (done: Int, total: Int) = (0, 0)
 
+    // MARK: - Chat
+
+    var showChatPanel: Bool = false
+    var chatSession = ChatSession()
+
     // MARK: - Services (initialized in start())
 
     private(set) var repository: BookRepository!
@@ -119,6 +124,7 @@ final class AppState {
     private(set) var hybridSearchManager: HybridSearchManager!
     private(set) var chunkRepository: TextChunkRepository!
     private(set) var modelInfoRepository: ModelInfoRepository!
+    private(set) var chatManager: ChatManager!
     let folderScanner = FolderScanner()
     let fileWatcher = FileWatcher()
     let metadataExtractor = MetadataExtractor()
@@ -193,6 +199,7 @@ final class AppState {
             embeddingManager: embeddingManager,
             chunkRepository: chunkRepository
         )
+        chatManager = ChatManager(hybridSearchManager: hybridSearchManager, llmEngine: llmEngine)
 
         startObservingDatabase()         // synchronous — @MainActor, no await needed
         await resolveAndWatchFolders()
@@ -909,6 +916,35 @@ final class AppState {
             guard !Task.isCancelled else { return }
             await performSearch(query: query)
         }
+    }
+
+    // MARK: - Chat
+
+    func sendChatMessage(_ text: String) async {
+        chatSession.isGenerating = true
+
+        // Scope books by sidebar selection
+        let scopedBooks: [Book]
+        switch sidebarSelection {
+        case .collection(let collectionId):
+            scopedBooks = books.filter { book in
+                collectionBookIDs.contains(book.id)
+            }
+        case .watchedFolder(let folderId):
+            if let folder = watchedFolders.first(where: { $0.id == folderId }) {
+                let folderPath = folder.path
+                scopedBooks = books.filter { $0.filePath.hasPrefix(folderPath) }
+            } else {
+                scopedBooks = books
+            }
+        default:
+            scopedBooks = books
+        }
+
+        let history = chatSession.messages
+        let response = await chatManager.sendMessage(text, books: scopedBooks, history: history)
+        chatSession.appendAssistantMessage(response.content, references: response.references)
+        chatSession.isGenerating = false
     }
 
     // MARK: - Thumbnail Loading
