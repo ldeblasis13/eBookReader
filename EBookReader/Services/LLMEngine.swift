@@ -201,9 +201,18 @@ actor LLMEngine {
         let mem = llama_get_memory(ctx)
         llama_memory_clear(mem, true)
 
-        // Process prompt
-        let promptBatch = llama_batch_get_one(&tokens, nTokens)
-        var result = llama_decode(ctx, promptBatch)
+        // Process prompt in batches of n_batch to avoid overflow
+        let nBatch: Int32 = 512
+        var result: Int32 = 0
+        var i: Int32 = 0
+        while i < nTokens {
+            let batchSize = min(nBatch, nTokens - i)
+            var batchTokens = Array(tokens[Int(i)..<Int(i + batchSize)])
+            let batch = llama_batch_get_one(&batchTokens, batchSize)
+            result = llama_decode(ctx, batch)
+            if result != 0 { break }
+            i += batchSize
+        }
         guard result == 0 else { throw LLMEngineError.inferenceFailed }
 
         // Create sampler
