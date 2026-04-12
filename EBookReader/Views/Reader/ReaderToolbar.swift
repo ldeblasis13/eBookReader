@@ -11,9 +11,6 @@ struct ReaderToolbar: View {
     @Binding var readerViewMode: ReaderViewMode
     let hasTOC: Bool
     var pageLabel: String = "Page"
-    /// For ePub: current chapter/total chapters for prev/next buttons (nil = hide buttons)
-    var chapterNav: (current: Int, total: Int)?
-    var onChapterChange: ((Int) -> Void)?
 
     @State private var isEditingPage = false
     @State private var pageInputText = ""
@@ -30,44 +27,6 @@ struct ReaderToolbar: View {
                     Image(systemName: "sidebar.left")
                 }
                 .help("Table of Contents")
-            }
-
-            // Prev/Next chapter for ePub
-            if let nav = chapterNav {
-                HStack(spacing: 2) {
-                    Button {
-                        onChapterChange?(nav.current - 1)
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .font(.system(size: 11))
-                            .frame(width: 22, height: 22)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(nav.current <= 0)
-                    .help("Previous chapter")
-
-                    Text("\(nav.current + 1)/\(nav.total)")
-                        .font(.caption2)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .frame(minWidth: 30)
-
-                    Button {
-                        onChapterChange?(nav.current + 1)
-                    } label: {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11))
-                            .frame(width: 22, height: 22)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(nav.current >= nav.total - 1)
-                    .help("Next chapter")
-                }
-                .padding(.horizontal, 2)
-                .background(.quaternary.opacity(0.5))
-                .clipShape(RoundedRectangle(cornerRadius: 4))
             }
 
             Spacer()

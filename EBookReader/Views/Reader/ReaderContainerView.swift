@@ -86,23 +86,6 @@ struct BookReaderView: View {
             showSearchPanel.toggle()
             if !showSearchPanel { searchState.clear() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .ebookReaderNavigateToSpineIndex)) { notification in
-            // Keep webReaderContent in sync for SwiftUI state (the coordinator handles the actual WKWebView load)
-            guard let spineIndex = notification.object as? Int,
-                  let epubContent,
-                  spineIndex >= 0, spineIndex < epubContent.spine.count else { return }
-            let chapterURL = epubContent.opfDirectoryURL.appendingPathComponent(
-                epubContent.spine[spineIndex].href
-            )
-            currentChapter = spineIndex
-            webReaderContent = .epubChapter(
-                chapterURL: chapterURL,
-                baseURL: epubContent.extractedBaseURL,
-                spineIndex: spineIndex,
-                totalSpineItems: epubContent.spine.count,
-                scrollFraction: 0
-            )
-        }
         .onKeyPress(.escape) {
             if showSearchPanel {
                 showSearchPanel = false
@@ -122,30 +105,8 @@ struct BookReaderView: View {
         .onChange(of: readerViewMode) {
             appState.readerViewMode = readerViewMode
             appState.persistSettings()
-
-            // ePub: switch between combined doc (scroll) and per-chapter (paginated)
-            if book.format == .epub, let epubContent {
-                if readerViewMode == .freeScroll, let combinedURL = epubCombinedURL {
-                    webReaderContent = .epubChapter(
-                        chapterURL: combinedURL,
-                        baseURL: epubContent.extractedBaseURL,
-                        spineIndex: 0,
-                        totalSpineItems: 1,
-                        scrollFraction: 0
-                    )
-                } else if readerViewMode != .freeScroll {
-                    let si = min(currentChapter, epubContent.spine.count - 1)
-                    let href = epubContent.spine[si].href
-                    let chapterURL = epubContent.opfDirectoryURL.appendingPathComponent(href)
-                    webReaderContent = .epubChapter(
-                        chapterURL: chapterURL,
-                        baseURL: epubContent.extractedBaseURL,
-                        spineIndex: si,
-                        totalSpineItems: epubContent.spine.count,
-                        scrollFraction: 0
-                    )
-                }
-            }
+            // View mode change is handled by the coordinator's applyViewMode() —
+            // no content reload needed since the entire book is one document
         }
         .task {
             await loadAnnotations()
@@ -372,24 +333,15 @@ struct BookReaderView: View {
     // MARK: - Toolbar
 
     private var readerToolbar: some View {
-        let isWebPaginated = book.format != .pdf && readerViewMode != .freeScroll
         return ReaderToolbar(
             book: book,
-            currentPage: book.format == .pdf ? currentPage : (isWebPaginated ? webPaginatedPage : currentChapter),
-            totalPages: book.format == .pdf ? totalPages : (isWebPaginated ? webPaginatedTotalPages : totalChapters),
+            currentPage: book.format == .pdf ? currentPage : webPaginatedPage,
+            totalPages: book.format == .pdf ? totalPages : webPaginatedTotalPages,
             showTOC: $showTOC,
             showSearch: $showSearchPanel,
             readerViewMode: $readerViewMode,
             hasTOC: hasTOC,
-            pageLabel: (book.format == .pdf || isWebPaginated) ? "Page" : "Chapter",
-            chapterNav: book.format == .epub && totalChapters > 1
-                ? (current: currentChapter, total: totalChapters) : nil,
-            onChapterChange: book.format == .epub ? { newIndex in
-                NotificationCenter.default.post(
-                    name: .ebookReaderNavigateToSpineIndex,
-                    object: newIndex
-                )
-            } : nil
+            pageLabel: "Page"
         )
     }
 
@@ -417,38 +369,22 @@ struct BookReaderView: View {
             let content = try await parser.parse(bookURL: book.fileURL, bookID: book.id)
             epubContent = content
 
-            // Build combined document for scroll mode
-            epubCombinedURL = try? await parser.buildCombinedDocument(for: content)
+            // Build combined document — used for ALL modes (scroll + paginated)
+            // This gives us exact book-wide page counts and seamless chapter transitions
+            guard let combinedURL = try? await parser.buildCombinedDocument(for: content) else { return }
+            epubCombinedURL = combinedURL
 
-            // Determine which chapter to start with
             let position = ReadingPosition.fromJSON(book.lastReadPosition)
-            var spineIndex = 0
             var scrollFraction = 0.0
-            if case .epub(let si, let sf) = position {
-                spineIndex = min(si, content.spine.count - 1)
+            if case .epub(_, let sf) = position {
                 scrollFraction = sf
             }
 
-            // Scroll mode: load entire book as one document
-            if readerViewMode == .freeScroll, let combinedURL = epubCombinedURL {
-                webReaderContent = .epubChapter(
-                    chapterURL: combinedURL,
-                    baseURL: content.extractedBaseURL,
-                    spineIndex: 0,
-                    totalSpineItems: 1,
-                    scrollFraction: scrollFraction
-                )
-                return
-            }
-
-            // Paginated modes: load individual chapter
-            guard let chapterURL = await parser.chapterURL(for: content, spineIndex: spineIndex) else { return }
-
             webReaderContent = .epubChapter(
-                chapterURL: chapterURL,
+                chapterURL: combinedURL,
                 baseURL: content.extractedBaseURL,
-                spineIndex: spineIndex,
-                totalSpineItems: content.spine.count,
+                spineIndex: 0,
+                totalSpineItems: 1,
                 scrollFraction: scrollFraction
             )
         } catch {

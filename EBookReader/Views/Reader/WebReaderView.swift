@@ -313,6 +313,11 @@ extension WebReaderView {
         private var pendingFindAfterNavigation: Bool = false
         var pendingStartAtEnd: Bool = false
 
+        // Book-wide page tracking for ePub
+        var chapterPageCounts: [Int: Int] = [:]  // spineIndex → page count (discovered)
+        var estimatedTotalBookPages: Int = 0
+        var pagesBeforeCurrentChapter: Int = 0
+
         /// Checks whether the new content represents the same loaded resource.
         func isSameContent(_ other: WebReaderContent) -> Bool {
             guard let current = content else { return false }
@@ -425,29 +430,39 @@ extension WebReaderView {
             var old = document.getElementById('__eb_pagination_style');
             if (old) old.remove();
             document.body.style.transform = '';
+            document.documentElement.scrollLeft = 0;
 
             var vpW = document.documentElement.clientWidth;
             var vpH = document.documentElement.clientHeight;
             var margin = 60;
             var blockMargin = 20;
-            var gap = 80;
-            var cols = \(colsPerScreen);
             var contentH = vpH - 2 * blockMargin;
+            var cols = \(colsPerScreen);
+
+            // Body uses border-box so padding is included in the explicit width.
+            // This ensures each column page aligns exactly to vpW boundaries.
             var usableW = vpW - 2 * margin;
-            var colW = cols === 1 ? usableW : Math.floor((usableW - gap * (cols - 1)) / cols);
-            var colAndGap = colW + gap;
-            var pageScroll = colAndGap * cols;
+            var gap, colW;
+            if (cols === 1) {
+                colW = usableW;
+                gap = margin * 2; // gap equals the two margins → pitch = colW + gap = vpW
+            } else {
+                gap = 60;
+                colW = Math.floor((usableW - gap) / 2);
+            }
+            var pitch = colW + gap; // distance per column in scrollWidth
 
             var style = document.createElement('style');
             style.id = '__eb_pagination_style';
             style.textContent =
                 'html { height:100%!important; overflow:hidden!important; margin:0!important; padding:0!important; }' +
                 'body { margin:0!important; padding:' + blockMargin + 'px ' + margin + 'px!important;' +
+                ' width:' + vpW + 'px!important; box-sizing:border-box!important;' +
                 ' height:' + contentH + 'px!important;' +
                 ' column-width:' + colW + 'px!important; column-gap:' + gap + 'px!important;' +
-                ' column-fill:auto!important; box-sizing:content-box!important;' +
+                ' column-fill:auto!important;' +
                 ' overflow-wrap:break-word!important; -webkit-margin-collapse:separate!important;' +
-                ' overflow:visible!important; min-width:0!important; max-width:none!important; }' +
+                ' overflow:visible!important; }' +
                 'p,li,blockquote,h1,h2,h3,h4,h5,h6,figure,pre,table,dl,dt,dd { break-inside:avoid!important; }' +
                 'img,svg,video { max-height:' + contentH + 'px!important; max-width:' + colW + 'px!important; break-inside:avoid!important; }';
             document.head.appendChild(style);
@@ -456,14 +471,16 @@ extension WebReaderView {
             window.__ebScrollMode = false;
             window.__ebCurrentPage = 0;
 
+            var pageAdvance = pitch * cols; // single: vpW, two: (colW+60)*2
+
             requestAnimationFrame(function() {
-                var totalCols = Math.max(1, Math.round(document.body.scrollWidth / colAndGap));
+                var sw = document.body.scrollWidth;
+                var totalCols = Math.max(1, Math.ceil(sw / pitch));
                 window.__ebTotalPages = Math.max(1, Math.ceil(totalCols / cols));
-                window.__ebPageSize = pageScroll;
-                // Respect pending page (set by Swift before pagination for zero-flash backward nav)
+                window.__ebPageSize = pageAdvance;
                 var startPage = 0;
                 if (window.__ebPendingPage === -1) { startPage = window.__ebTotalPages - 1; }
-                else if (window.__ebPendingPage > 0) { startPage = window.__ebPendingPage; }
+                else if (window.__ebPendingPage > 0) { startPage = Math.min(window.__ebPendingPage, window.__ebTotalPages - 1); }
                 window.__ebPendingPage = undefined;
                 window.__ebGoToPage(startPage);
             });
@@ -486,12 +503,7 @@ extension WebReaderView {
                     return;
                 }
                 window.__ebCurrentPage = page;
-                var pos = page * window.__ebPageSize;
-                var maxPos = document.body.scrollWidth - document.documentElement.clientWidth;
-                if (maxPos > 0 && pos > maxPos) {
-                    pos = Math.floor(maxPos / window.__ebPageSize) * window.__ebPageSize;
-                }
-                document.documentElement.scrollLeft = Math.max(0, pos);
+                document.documentElement.scrollLeft = page * window.__ebPageSize;
                 window.webkit.messageHandlers.paginationState.postMessage(
                     JSON.stringify({current: page, total: window.__ebTotalPages})
                 );
