@@ -62,9 +62,9 @@ struct ChatPanelView: View {
 
     private var chatHeader: some View {
         HStack {
-            Image(systemName: "sparkles")
-                .foregroundStyle(.blue)
-            Text("AI Chat")
+            Image(systemName: appState.isCookbookModeActive ? "fork.knife" : "sparkles")
+                .foregroundStyle(appState.isCookbookModeActive ? .orange : .blue)
+            Text(appState.isCookbookModeActive ? "Cookbook Search" : "AI Chat")
                 .font(.headline)
             Spacer()
             Button {
@@ -96,7 +96,7 @@ struct ChatPanelView: View {
 
     private var chatInput: some View {
         HStack(spacing: 8) {
-            TextField("Ask about your books...", text: Binding(
+            TextField(appState.isCookbookModeActive ? "Search recipes..." : "Ask about your books...", text: Binding(
                 get: { appState.chatSession.inputText },
                 set: { appState.chatSession.inputText = $0 }
             ), axis: .vertical)
@@ -184,15 +184,22 @@ struct ChatMessageView: View {
 
             // Book references (assistant only)
             if !message.references.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Sources")
+                let hasRecipes = message.references.contains(where: \.isRecipe)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(hasRecipes ? "From Your Cookbooks" : "Sources")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                         .textCase(.uppercase)
 
                     ForEach(message.references) { ref in
-                        BookReferenceCard(reference: ref) {
-                            onOpenReference(ref)
+                        if ref.isRecipe {
+                            RecipeCardView(reference: ref) {
+                                onOpenReference(ref)
+                            }
+                        } else {
+                            BookReferenceCard(reference: ref) {
+                                onOpenReference(ref)
+                            }
                         }
                     }
                 }

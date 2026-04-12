@@ -22,6 +22,8 @@ targets:
       - path: EBookReader
         excludes:
           - "**/*.entitlements"
+      - path: Vendor/llama-prebuilt/ggml-metal.metal
+        buildPhase: none
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lucadeblasis.EBookReader

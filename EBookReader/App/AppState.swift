@@ -112,6 +112,12 @@ final class AppState {
     var showChatPanel: Bool = false
     var chatSession = ChatSession()
 
+    /// True when the currently selected sidebar collection is flagged as a cookbook.
+    var isCookbookModeActive: Bool {
+        guard case .collection(let id) = sidebarSelection else { return false }
+        return collections.first(where: { $0.id == id })?.isCookbook ?? false
+    }
+
     // MARK: - Services (initialized in start())
 
     private(set) var repository: BookRepository!
@@ -199,15 +205,22 @@ final class AppState {
             embeddingManager: embeddingManager,
             chunkRepository: chunkRepository
         )
-        chatManager = ChatManager(hybridSearchManager: hybridSearchManager, llmEngine: llmEngine)
+        chatManager = ChatManager(hybridSearchManager: hybridSearchManager, llmEngine: llmEngine, chunkRepository: chunkRepository)
 
         startObservingDatabase()         // synchronous — @MainActor, no await needed
         await resolveAndWatchFolders()
         await restoreTabs()
         await startBackgroundIndexing()
 
-        // Model download + embedding indexing (non-blocking)
-        Task { await checkAndDownloadModels() }
+        // Model download + embedding indexing + preload LLM (non-blocking)
+        Task {
+            await checkAndDownloadModels()
+            // Preload generation model in background so chat is instant when opened
+            Task.detached(priority: .background) { [weak self] in
+                guard let self else { return }
+                try? await self.llmEngine.preloadGenerationModel()
+            }
+        }
     }
 
     // MARK: - Database Observation
@@ -624,6 +637,7 @@ final class AppState {
 
         let pending = models.filter { !$0.isReady }
         guard !pending.isEmpty else {
+            await loadLLMModel()
             await startEmbeddingIndexing()
             return
         }
@@ -643,18 +657,57 @@ final class AppState {
         embeddingModelReady = await modelDownloadManager.verifyModel(id: Constants.Models.embeddingModelId)
         llmModelReady = await modelDownloadManager.verifyModel(id: Constants.Models.llmModelId)
 
+        await loadLLMModel()
         await startEmbeddingIndexing()
+    }
+
+    var llmLoadError: String?
+
+    func loadLLMModel() async {
+        guard llmModelReady else {
+            llmLoadError = "LLM model not marked as ready"
+            logger.warning("LLM model not ready, skipping load")
+            return
+        }
+        guard let path = await modelDownloadManager.modelPath(id: Constants.Models.llmModelId) else {
+            llmLoadError = "Model path not found in database"
+            logger.error("LLM model path not found despite ready status")
+            return
+        }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path.path) else {
+            llmLoadError = "File missing at: \(path.path)"
+            logger.error("LLM model file missing at: \(path.path)")
+            return
+        }
+        if let attrs = try? fm.attributesOfItem(atPath: path.path),
+           let size = attrs[.size] as? Int64 {
+            logger.info("LLM model file: \(size) bytes at \(path.path)")
+            if size < 1_000_000 {
+                llmLoadError = "File too small (\(size) bytes) — corrupt download"
+                return
+            }
+        }
+        do {
+            try await llmEngine.loadGenerationModel(path: path.path)
+            llmLoadError = nil
+            logger.info("LLM generation model loaded successfully")
+        } catch {
+            llmLoadError = "llama.cpp load failed: \(error)"
+            logger.error("Failed to load LLM generation model: \(error)")
+        }
     }
 
     private func startEmbeddingIndexing() async {
         guard embeddingModelReady, !isEmbeddingIndexing else { return }
 
-        // Load models lazily
         if let path = await modelDownloadManager.modelPath(id: Constants.Models.embeddingModelId) {
-            try? await llmEngine.loadEmbeddingModel(path: path.path)
-        }
-        if llmModelReady, let path = await modelDownloadManager.modelPath(id: Constants.Models.llmModelId) {
-            try? await llmEngine.loadGenerationModel(path: path.path)
+            do {
+                try await llmEngine.loadEmbeddingModel(path: path.path)
+            } catch {
+                logger.error("Failed to load embedding model: \(error)")
+                return
+            }
         }
 
         isEmbeddingIndexing = true
@@ -857,6 +910,12 @@ final class AppState {
         }
     }
 
+    func toggleCookbookType(collectionId: UUID) async {
+        guard var collection = collections.first(where: { $0.id == collectionId }) else { return }
+        collection.collectionType = collection.isCookbook ? "default" : "cookbook"
+        try? await collectionRepository.updateCollection(collection)
+    }
+
     func loadCollectionBooks(_ collectionId: UUID) async {
         let ids = (try? await collectionRepository.fetchBookIDs(inCollection: collectionId)) ?? []
         collectionBookIDs = Set(ids)
@@ -944,8 +1003,22 @@ final class AppState {
             scopedBooks = books
         }
 
+        // Try to load generation model on-demand if not loaded
+        await loadLLMModel()
+
+        // Pass debug info to chat manager
+        await chatManager.setDebugInfo(llmLoadError)
+
         let history = chatSession.messages
-        let response = await chatManager.sendMessage(text, books: scopedBooks, history: history)
+        // Pass current book for summarization queries
+        let currentBook: Book?
+        if let activeTab, let book = books.first(where: { $0.id == activeTab.bookID }) {
+            currentBook = book
+        } else {
+            currentBook = nil
+        }
+
+        let response = await chatManager.sendMessage(text, books: scopedBooks, history: history, currentBook: currentBook, isCookbookMode: isCookbookModeActive)
         chatSession.appendAssistantMessage(response.content, references: response.references)
         chatSession.isGenerating = false
     }

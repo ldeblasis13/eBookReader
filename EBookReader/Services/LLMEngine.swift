@@ -32,14 +32,24 @@ actor LLMEngine {
 
     // MARK: - Model Loading
 
+    private var embeddingModelPath: String?
+
     func loadEmbeddingModel(path: String) throws {
         guard !isEmbeddingLoaded else { return }
-        logger.info("Loading embedding model from: \(path)")
+        logger.info("Embedding model will be loaded on first use from: \(path)")
+        embeddingModelPath = path
+        isEmbeddingLoaded = true
+    }
+
+    private func ensureEmbeddingModelLoaded() throws {
+        guard embeddingContext == nil, let path = embeddingModelPath else { return }
+        logger.info("Deferred loading embedding model from: \(path)")
 
         var modelParams = llama_model_default_params()
         modelParams.n_gpu_layers = 99
 
         guard let model = llama_model_load_from_file(path, modelParams) else {
+            isEmbeddingLoaded = false
             throw LLMEngineError.modelNotLoaded
         }
         embeddingModel = model
@@ -54,27 +64,41 @@ actor LLMEngine {
         guard let ctx = llama_init_from_model(model, ctxParams) else {
             llama_model_free(model)
             embeddingModel = nil
+            isEmbeddingLoaded = false
             throw LLMEngineError.modelNotLoaded
         }
         embeddingContext = ctx
-        isEmbeddingLoaded = true
         logger.info("Embedding model loaded successfully")
     }
 
     func loadGenerationModel(path: String) throws {
         guard !isGenerationLoaded else { return }
-        logger.info("Loading generation model from: \(path)")
+        logger.info("Generation model will be loaded on first use from: \(path)")
+        // Store path for deferred loading — the actual llama_model_load_from_file
+        // call happens in generate() on first use, running on a detached task
+        // to avoid blocking the actor during the heavy 2.3GB load.
+        generationModelPath = path
+        isGenerationLoaded = true // mark as "available" so generate() proceeds
+    }
+
+    private var generationModelPath: String?
+
+    private func ensureGenerationModelLoaded() throws {
+        guard generationContext == nil, let path = generationModelPath else { return }
+        logger.info("Deferred loading generation model from: \(path)")
 
         var modelParams = llama_model_default_params()
         modelParams.n_gpu_layers = 99
 
         guard let model = llama_model_load_from_file(path, modelParams) else {
+            logger.error("llama_model_load_from_file returned nil")
+            isGenerationLoaded = false
             throw LLMEngineError.modelNotLoaded
         }
         generationModel = model
 
         var ctxParams = llama_context_default_params()
-        ctxParams.n_ctx = 4096
+        ctxParams.n_ctx = 32768
         ctxParams.n_batch = 512
         ctxParams.n_threads = Int32(max(1, ProcessInfo.processInfo.processorCount - 2))
         ctxParams.n_threads_batch = ctxParams.n_threads
@@ -83,17 +107,28 @@ actor LLMEngine {
         guard let ctx = llama_init_from_model(model, ctxParams) else {
             llama_model_free(model)
             generationModel = nil
+            isGenerationLoaded = false
             throw LLMEngineError.modelNotLoaded
         }
         generationContext = ctx
-        isGenerationLoaded = true
         logger.info("Generation model loaded successfully")
+    }
+
+    /// Eagerly loads the generation model in the background so it's ready when chat is opened.
+    func preloadGenerationModel() throws {
+        try ensureGenerationModelLoaded()
+    }
+
+    /// Eagerly loads the embedding model in the background.
+    func preloadEmbeddingModel() throws {
+        try ensureEmbeddingModelLoaded()
     }
 
     // MARK: - Embedding
 
     func embed(text: String) throws -> [Float] {
-        guard isEmbeddingLoaded, let ctx = embeddingContext, let model = embeddingModel else {
+        try ensureEmbeddingModelLoaded()
+        guard let ctx = embeddingContext, let model = embeddingModel else {
             throw LLMEngineError.modelNotLoaded
         }
 
@@ -141,16 +176,26 @@ actor LLMEngine {
     // MARK: - Generation
 
     func generate(prompt: String, maxTokens: Int = 1024) throws -> String {
-        guard isGenerationLoaded, let ctx = generationContext, let model = generationModel else {
+        try ensureGenerationModelLoaded()
+
+        guard let ctx = generationContext, let model = generationModel else {
             throw LLMEngineError.modelNotLoaded
         }
 
         let vocab = llama_model_get_vocab(model)
+        let nCtx = Int32(llama_n_ctx(ctx))
 
-        // Tokenize prompt
-        let maxPromptTokens: Int32 = 3072
-        var tokens = [llama_token](repeating: 0, count: Int(maxPromptTokens))
-        let nTokens = llama_tokenize(vocab, prompt, Int32(prompt.utf8.count), &tokens, maxPromptTokens, true, true)
+        // Tokenize prompt — leave room for response tokens
+        let safePromptLimit = nCtx - Int32(min(maxTokens, Int(nCtx / 2)))
+        let tokenBufSize = max(safePromptLimit, 1024)
+        var tokens = [llama_token](repeating: 0, count: Int(tokenBufSize))
+        var nTokens = llama_tokenize(vocab, prompt, Int32(prompt.utf8.count), &tokens, tokenBufSize, true, true)
+
+        // If prompt is too long, truncate to fit
+        if nTokens < 0 || nTokens > safePromptLimit {
+            nTokens = min(abs(nTokens), safePromptLimit)
+            logger.warning("Prompt truncated to \(nTokens) tokens (context limit: \(nCtx))")
+        }
         guard nTokens > 0 else { throw LLMEngineError.tokenizationFailed }
 
         // Clear memory
@@ -168,21 +213,36 @@ actor LLMEngine {
         llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9, 1))
         llama_sampler_chain_add(sampler, llama_sampler_init_dist(UInt32.random(in: 0...UInt32.max)))
 
-        // Generate tokens
+        // Generate tokens — hard stop before context overflow
         var output = ""
         var nCur = nTokens
         let eosToken = llama_vocab_eos(vocab)
+        let eotToken = llama_vocab_eot(vocab)
+        let hardLimit = nCtx - 2 // never reach the absolute edge
 
         for _ in 0..<maxTokens {
+            // CRASH PREVENTION: stop before overflowing context
+            if nCur >= hardLimit {
+                logger.warning("Stopping generation: context limit reached (\(nCur)/\(nCtx))")
+                break
+            }
+
             let newToken = llama_sampler_sample(sampler, ctx, -1)
-            if newToken == eosToken { break }
+            if newToken == eosToken || newToken == eotToken { break }
 
             // Convert token to text
             var buf = [CChar](repeating: 0, count: 256)
             let len = llama_token_to_piece(vocab, newToken, &buf, 256, 0, true)
             if len > 0 {
-                buf[Int(len)] = 0 // null terminate
-                output += String(cString: buf)
+                buf[Int(len)] = 0
+                let piece = String(cString: buf)
+                if piece.contains("<end_of_turn>") || piece.contains("<eos>") {
+                    let clean = piece.replacingOccurrences(of: "<end_of_turn>", with: "")
+                        .replacingOccurrences(of: "<eos>", with: "")
+                    output += clean
+                    break
+                }
+                output += piece
             }
 
             // Decode next token

@@ -39,6 +39,7 @@ struct ChatMessage: Identifiable, Sendable {
         let author: String?
         let snippet: String
         let position: ContentPosition?
+        let isRecipe: Bool
 
         init(
             id: UUID = UUID(),
@@ -46,7 +47,8 @@ struct ChatMessage: Identifiable, Sendable {
             bookTitle: String,
             author: String? = nil,
             snippet: String,
-            position: ContentPosition? = nil
+            position: ContentPosition? = nil,
+            isRecipe: Bool = false
         ) {
             self.id = id
             self.bookId = bookId
@@ -54,6 +56,7 @@ struct ChatMessage: Identifiable, Sendable {
             self.author = author
             self.snippet = snippet
             self.position = position
+            self.isRecipe = isRecipe
         }
     }
 }

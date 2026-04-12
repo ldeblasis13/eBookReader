@@ -9,7 +9,7 @@ APP_PATH = $(BUILD_DIR)/Build/Products/$(CONFIG)/$(APP_NAME).app
 
 build:
 	xcodebuild -project $(PROJECT) -scheme $(SCHEME) -configuration $(CONFIG) \
-		-derivedDataPath $(BUILD_DIR) ONLY_ACTIVE_ARCH=NO 2>&1 | tail -3
+		-derivedDataPath $(BUILD_DIR) ONLY_ACTIVE_ARCH=YES ARCHS=arm64 2>&1 | tail -3
 	@echo "\n✓ Built at: $(APP_PATH)"
 
 install: build

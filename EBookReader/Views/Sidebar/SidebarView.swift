@@ -172,7 +172,7 @@ struct CollectionSidebarItem: View {
                 Label {
                     Text(collection.name)
                 } icon: {
-                    Image(systemName: "folder.circle")
+                    Image(systemName: collection.isCookbook ? "fork.knife.circle" : "folder.circle")
                 }
             }
         }
@@ -204,6 +204,12 @@ struct CollectionSidebarItem: View {
                         }
                     }
                 }
+            }
+
+            Divider()
+
+            Button(collection.isCookbook ? "Mark as Regular Collection" : "Mark as Cookbook") {
+                Task { await appState.toggleCookbookType(collectionId: collection.id) }
             }
 
             Divider()

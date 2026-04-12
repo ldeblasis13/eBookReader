@@ -7,19 +7,24 @@ struct Collection: Identifiable, Codable, Sendable, Hashable {
     var collectionGroupId: UUID?
     var sortOrder: Int
     var dateCreated: Date
+    var collectionType: String
+
+    var isCookbook: Bool { collectionType == "cookbook" }
 
     init(
         id: UUID = UUID(),
         name: String,
         collectionGroupId: UUID? = nil,
         sortOrder: Int = 0,
-        dateCreated: Date = Date()
+        dateCreated: Date = Date(),
+        collectionType: String = "default"
     ) {
         self.id = id
         self.name = name
         self.collectionGroupId = collectionGroupId
         self.sortOrder = sortOrder
         self.dateCreated = dateCreated
+        self.collectionType = collectionType
     }
 }
 
@@ -27,7 +32,7 @@ extension Collection: FetchableRecord, MutablePersistableRecord {
     static let databaseTableName = "collection"
 
     enum Columns: String, ColumnExpression {
-        case id, name, collectionGroupId, sortOrder, dateCreated
+        case id, name, collectionGroupId, sortOrder, dateCreated, collectionType
     }
 }
 

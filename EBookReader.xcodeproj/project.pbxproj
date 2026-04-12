@@ -22,6 +22,7 @@
 		2F8A01093FE02D37D4FDE175 /* Annotation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29583FDDA1EDC8E19D150614 /* Annotation.swift */; };
 		323D42BC252F2CA9ED8DED5C /* ChatSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBA5C5E676C1EC7FC586FA55 /* ChatSession.swift */; };
 		3755F7588904DA39358E97F9 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C811148A6C107EF81E094901 /* SidebarView.swift */; };
+		3E2CC85DFC14853F14564DFD /* RecipeDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C19C0E0CED69F73AF8ED5B2 /* RecipeDetector.swift */; };
 		3F45F8F9EDF73E6140D63CDF /* BookRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = C66CCFC3541A7692D2F2CC31 /* BookRepository.swift */; };
 		40E3DCECCD89022C3245ADD5 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60347F3075065D72684C6AA8 /* Theme.swift */; };
 		42C841381410E192F4929602 /* TableOfContentsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE63A71CF50B746CE29421E9 /* TableOfContentsView.swift */; };
@@ -70,6 +71,7 @@
 		EFD43937EE1CE21AB8421C64 /* FileTypeDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6EF116E2C04BD283754A4E /* FileTypeDetector.swift */; };
 		F1F39CEC22D6938330B6B4C2 /* EmbeddingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBE0E4F897F19AA5DDE19F4C /* EmbeddingManager.swift */; };
 		F8E7EAF1B11EB2CE0BB877B0 /* TextChunkRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5A20359254404062CAD8108 /* TextChunkRepository.swift */; };
+		FA14A38C35B11D4441D1782A /* RecipeCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C41343C0F9C98E94F16D0075 /* RecipeCardView.swift */; };
 		FCA86632A60429A890055A03 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1751D73141F01E3D91DE3278 /* Assets.xcassets */; };
 		FD153A230C2D31C2ED304C70 /* BookFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E9193457CE9D206D0EBC8FC /* BookFormat.swift */; };
 /* End PBXBuildFile section */
@@ -119,6 +121,7 @@
 		7FDC1E260CB3465DB584C208 /* EBookReaderTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EBookReaderTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		819F11252445D0E6739D43A9 /* LLMEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMEngine.swift; sourceTree = "<group>"; };
 		83ED66FFCCB08DE481DF89CE /* TextExtractor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextExtractor.swift; sourceTree = "<group>"; };
+		85E447A9C5F304A2D2ADCA66 /* ggml-metal.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "ggml-metal.metal"; sourceTree = "<group>"; };
 		8E9193457CE9D206D0EBC8FC /* BookFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookFormat.swift; sourceTree = "<group>"; };
 		913950FE14B8C92AA37A5023 /* ModelInfo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelInfo.swift; sourceTree = "<group>"; };
 		9238F97645E2EA9346A931FA /* InBookSearchState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InBookSearchState.swift; sourceTree = "<group>"; };
@@ -126,6 +129,7 @@
 		94F169A0E1364265BC3A4030 /* QuickLookPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookPreviewView.swift; sourceTree = "<group>"; };
 		99DAC9BDE712BF2A890CD101 /* FileWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileWatcher.swift; sourceTree = "<group>"; };
 		9AF546C1C5230B9144389B7F /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
+		9C19C0E0CED69F73AF8ED5B2 /* RecipeDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecipeDetector.swift; sourceTree = "<group>"; };
 		9F184D068E3B85EDA4BA7EB3 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A258D184EFC7293E59D6D545 /* MobiParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobiParser.swift; sourceTree = "<group>"; };
 		A2EF52A4C9C708304B9EA8EB /* SearchResultsSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchResultsSidebar.swift; sourceTree = "<group>"; };
@@ -136,6 +140,7 @@
 		B59409A7549D4A6FD672BDE4 /* EPubParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EPubParser.swift; sourceTree = "<group>"; };
 		BD6011D537448CDAF26AE952 /* WebReaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebReaderView.swift; sourceTree = "<group>"; };
 		BF66EB61474A6509381A24AD /* ModelInfoRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelInfoRepository.swift; sourceTree = "<group>"; };
+		C41343C0F9C98E94F16D0075 /* RecipeCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecipeCardView.swift; sourceTree = "<group>"; };
 		C43E503BA4592FBFBE64011C /* EBookReaderApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EBookReaderApp.swift; sourceTree = "<group>"; };
 		C66CCFC3541A7692D2F2CC31 /* BookRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookRepository.swift; sourceTree = "<group>"; };
 		C811148A6C107EF81E094901 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
@@ -176,6 +181,7 @@
 			isa = PBXGroup;
 			children = (
 				BBB0F4805A1031C2EE57784B /* EBookReader */,
+				F57A90FCE57C102AE5F06B8A /* llama-prebuilt */,
 				75F5DC61170CF493C5208BB6 /* Tests */,
 				91DFB52247038E8F354690A1 /* Products */,
 			);
@@ -227,6 +233,7 @@
 				1C77AA243D2C5B68A5AD7055 /* MetadataExtractor.swift */,
 				117ACAC80BE47C2DA9FD8ACF /* ModelDownloadManager.swift */,
 				0000B390623AEF7F3A687171 /* PositionAwareTextExtractor.swift */,
+				9C19C0E0CED69F73AF8ED5B2 /* RecipeDetector.swift */,
 				83ED66FFCCB08DE481DF89CE /* TextExtractor.swift */,
 				66910D00A77C40401D43CBD2 /* ThumbnailGenerator.swift */,
 			);
@@ -337,6 +344,7 @@
 			isa = PBXGroup;
 			children = (
 				B17B8B755AB4A05C583261AD /* ChatPanelView.swift */,
+				C41343C0F9C98E94F16D0075 /* RecipeCardView.swift */,
 			);
 			path = Chat;
 			sourceTree = "<group>";
@@ -408,6 +416,15 @@
 				93F90E2D8FDAF5623646929E /* WatchedFolderSidebarItem.swift */,
 			);
 			path = Sidebar;
+			sourceTree = "<group>";
+		};
+		F57A90FCE57C102AE5F06B8A /* llama-prebuilt */ = {
+			isa = PBXGroup;
+			children = (
+				85E447A9C5F304A2D2ADCA66 /* ggml-metal.metal */,
+			);
+			name = "llama-prebuilt";
+			path = "Vendor/llama-prebuilt";
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -560,6 +577,8 @@
 				4A8EDF3DF392816CD52203FB /* ReaderContainerView.swift in Sources */,
 				056FD270F9B9C1E7E48F6D97 /* ReaderTab.swift in Sources */,
 				B502046AF24D4305FB2A29F2 /* ReaderToolbar.swift in Sources */,
+				FA14A38C35B11D4441D1782A /* RecipeCardView.swift in Sources */,
+				3E2CC85DFC14853F14564DFD /* RecipeDetector.swift in Sources */,
 				51E0D68C5EFDB2673CE1E1BA /* SearchResultsSidebar.swift in Sources */,
 				547490929678B512E4FC882E /* SearchResultsView.swift in Sources */,
 				076D435BA94D54CC39DCE7DE /* SettingsView.swift in Sources */,

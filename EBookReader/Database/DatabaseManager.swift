@@ -200,6 +200,25 @@ final class DatabaseManager: Sendable {
             }
         }
 
+        migrator.registerMigration("v7") { db in
+            // Cookbook mode: collection type flag
+            try db.alter(table: "collection") { t in
+                t.add(column: "collectionType", .text).notNull().defaults(to: "default")
+            }
+
+            // Recipe hints from heuristic detection
+            try db.create(table: "recipeHint") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("chunkId", .integer).notNull()
+                    .references("textChunk", onDelete: .cascade)
+                t.column("score", .double).notNull()
+                t.column("detectedTitle", .text)
+                t.column("dateDetected", .datetime).notNull()
+            }
+            try db.create(index: "idx_recipeHint_chunkId", on: "recipeHint", columns: ["chunkId"], unique: true)
+            try db.create(index: "idx_recipeHint_score", on: "recipeHint", columns: ["score"])
+        }
+
         return migrator
     }
 }
