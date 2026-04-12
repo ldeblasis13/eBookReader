@@ -22,11 +22,10 @@ actor LLMEngine {
         llama_backend_init()
     }
 
-    deinit {
-        if let ctx = embeddingContext { llama_free(ctx) }
-        if let model = embeddingModel { llama_model_free(model) }
-        if let ctx = generationContext { llama_free(ctx) }
-        if let model = generationModel { llama_model_free(model) }
+    /// Must be called before app exit to prevent Metal resource cleanup crash.
+    func shutdown() {
+        unloadEmbeddingModel()
+        unloadGenerationModel()
         llama_backend_free()
     }
 

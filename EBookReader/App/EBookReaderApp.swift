@@ -14,6 +14,7 @@ struct EBookReaderApp: App {
                     await appState.start()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    appState.shutdownLLM()
                     appState.prepareForTermination()
                     appState.persistSettings()
                     appState.stopAccessingFolders()

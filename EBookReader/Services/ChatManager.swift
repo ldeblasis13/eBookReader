@@ -39,22 +39,15 @@ actor ChatManager {
     """
 
     private let cookbookSystemPrompt = """
-    You are a cookbook assistant searching the user's personal cookbook library. \
-    The excerpts below are from their cookbooks. \
-    STRICT RULES: \
-    1. ONLY use recipes and information from the provided excerpts. Do NOT invent recipes. \
-    2. For EACH recipe found, present it in this exact format: \
-       RECIPE: [Recipe Name] \
-       BOOK: [Book Title] \
-       INGREDIENTS: [list all ingredients with quantities, one per line] \
-       PREP TIME: [if mentioned] \
-       COOK TIME: [if mentioned] \
-       INSTRUCTIONS: [brief summary of key steps] \
-    3. Number each recipe clearly (1., 2., 3., etc.) \
-    4. If the user asks for a specific number of recipes, try to find that many. \
-    5. If the user mentions ingredients they have, find recipes that use those ingredients. \
-    6. If you can't find enough recipes, say how many you found and suggest broadening the search. \
-    7. Never invent recipes not found in the excerpts.
+    You are a cookbook assistant. You can ONLY reference recipes that appear in the excerpts below. \
+    ABSOLUTE RULES — VIOLATION MEANS FAILURE: \
+    1. If NO excerpts are provided, respond ONLY with: "I couldn't find any matching recipes in your cookbooks. Try a different search term." \
+    2. NEVER invent a recipe. NEVER reference a book that is not in the excerpts. \
+    3. Only describe recipes you can actually see in the provided text. \
+    4. For each recipe found in the excerpts, present: the recipe name, the book it's from, and any ingredients or instructions visible in the excerpt. \
+    5. If the excerpt only partially describes a recipe, say so and suggest the user open the book to see the full recipe. \
+    6. Number each recipe clearly. \
+    7. If the user mentions ingredients, only show recipes from the excerpts that use those ingredients.
     """
 
     // MARK: - Send Message
@@ -97,6 +90,14 @@ actor ChatManager {
 
         let topResults = Array(searchResults.prefix(maxContextChunks))
 
+        // If no results found, don't call the LLM — it will just hallucinate
+        if topResults.isEmpty {
+            let noResultsMsg = isCookbookMode
+                ? "I couldn't find any matching recipes in your cookbooks. Make sure your cookbook books have been indexed (check the progress bar in the library). Try different search terms."
+                : "I couldn't find relevant information in your books for that query. Try rephrasing or using different keywords."
+            return ChatMessage(role: .assistant, content: noResultsMsg)
+        }
+
         // Step 2: Build the prompt with context
         let prompt = buildPrompt(userQuery: text, context: topResults, history: history, isCookbookMode: isCookbookMode)
 
@@ -120,7 +121,7 @@ actor ChatManager {
                 bookId: result.bookId,
                 bookTitle: result.title,
                 author: result.author,
-                snippet: String(result.snippet.prefix(150)),
+                snippet: result.snippet,
                 position: result.position,
                 isRecipe: isCookbookMode
             )

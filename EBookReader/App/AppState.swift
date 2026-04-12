@@ -1076,4 +1076,11 @@ final class AppState {
         persistSettings()
         restartBookObservation()
     }
+
+    /// Cleanly shuts down LLM resources before app exit to prevent Metal crash.
+    func shutdownLLM() {
+        Task {
+            await llmEngine?.shutdown()
+        }
+    }
 }
