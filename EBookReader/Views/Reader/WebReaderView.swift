@@ -28,6 +28,7 @@ struct WebReaderView: NSViewRepresentable {
         config.userContentController.add(proxy, name: "searchResults")
         config.userContentController.add(proxy, name: "paginationState")
         config.userContentController.add(proxy, name: "annotationSelection")
+        config.userContentController.add(proxy, name: "chapterBoundary")
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
@@ -37,6 +38,13 @@ struct WebReaderView: NSViewRepresentable {
         context.coordinator.bookId = bookId
 
         loadContent(in: webView, context: context)
+
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.handleSpineNavigation(_:)),
+            name: .ebookReaderNavigateToSpineIndex,
+            object: nil
+        )
 
         NotificationCenter.default.addObserver(
             context.coordinator,
@@ -81,8 +89,11 @@ struct WebReaderView: NSViewRepresentable {
         coord.searchState = searchState
         coord.annotationState = annotationState
         coord.bookId = bookId
-        coord.content = content
         coord.epubContent = epubContent
+
+        // Detect chapter/content change and reload if needed
+        let contentChanged = !coord.isSameContent(content)
+        coord.content = content
 
         // Set callbacks once to avoid closure re-creation on every updateNSView call.
         // Bindings are structs (stable for the view's lifetime) so capture by value is fine.
@@ -129,6 +140,22 @@ struct WebReaderView: NSViewRepresentable {
                 }
             }
         }
+        if coord.onChapterAdvance == nil {
+            coord.onChapterAdvance = { [weak coord] newSpineIndex, startAtEnd in
+                guard let coord else { return }
+                NotificationCenter.default.post(
+                    name: .ebookReaderNavigateToSpineIndex,
+                    object: newSpineIndex,
+                    userInfo: startAtEnd ? ["startAtEnd": true] : nil
+                )
+            }
+        }
+
+        // Reload content if it changed (e.g., ePub chapter navigation)
+        if contentChanged {
+            reloadContent(in: webView, context: context)
+            return // didFinish will handle theme, annotations, pagination
+        }
 
         // Update annotation mode in JS only when needed
         if let annotationState {
@@ -148,6 +175,33 @@ struct WebReaderView: NSViewRepresentable {
             coord.currentTheme = appState.readerTheme
             coord.currentFontSize = appState.readerFontSize
             coord.applyTheme()
+            // Re-apply pagination after theme so gradient CSS takes priority
+            coord.applyViewMode()
+        }
+    }
+
+    /// Reloads content into an existing WKWebView (used when chapter changes).
+    private func reloadContent(in webView: WKWebView, context: Context) {
+        switch content {
+        case .epubChapter(let chapterURL, let baseURL, let spineIndex, let totalSpineItems, _):
+            totalChapters = totalSpineItems
+            currentChapter = spineIndex
+            webView.loadFileURL(chapterURL, allowingReadAccessTo: baseURL)
+
+        case .fb2HTML(let html, let sectionCount, _):
+            totalChapters = sectionCount
+            currentChapter = 0
+            webView.loadHTMLString(html, baseURL: nil)
+
+        case .mobiHTML(let html, let chapterCount, _):
+            totalChapters = chapterCount
+            currentChapter = 0
+            webView.loadHTMLString(html, baseURL: nil)
+
+        case .chmHTML(let html, let sectionCount, _):
+            totalChapters = sectionCount
+            currentChapter = 0
+            webView.loadHTMLString(html, baseURL: nil)
         }
     }
 
@@ -159,6 +213,7 @@ struct WebReaderView: NSViewRepresentable {
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "searchResults")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "paginationState")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "annotationSelection")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "chapterBoundary")
     }
 
     private func loadContent(in webView: WKWebView, context: Context) {
@@ -253,8 +308,28 @@ extension WebReaderView {
         var currentTheme: ReaderTheme = .normal
         var currentFontSize: Double = 16
         var epubContent: EPubParser.EPubContent?
+        var onChapterAdvance: (@Sendable (Int, Bool) -> Void)?
         private var lastFindQuery: String = ""
         private var pendingFindAfterNavigation: Bool = false
+        var pendingStartAtEnd: Bool = false
+
+        /// Checks whether the new content represents the same loaded resource.
+        func isSameContent(_ other: WebReaderContent) -> Bool {
+            guard let current = content else { return false }
+            switch (current, other) {
+            case (.epubChapter(let a, _, let si1, _, _), .epubChapter(let b, _, let si2, _, _)):
+                return a == b && si1 == si2
+            case (.fb2HTML(let a, _, _), .fb2HTML(let b, _, _)):
+                // HTML string identity — same pointer or same chapter reload
+                return a == b
+            case (.mobiHTML(let a, _, _), .mobiHTML(let b, _, _)):
+                return a == b
+            case (.chmHTML(let a, _, _), .chmHTML(let b, _, _)):
+                return a == b
+            default:
+                return false
+            }
+        }
 
         deinit {
             // Safety net: clean up observer in case dismantleNSView wasn't called
@@ -285,100 +360,269 @@ extension WebReaderView {
         })();
         """
 
-        /// JS that sets up CSS column-based pagination
-        private static func paginationSetupJS(columns: Int) -> String {
-            return """
-            (function() {
-                // Remove previous pagination if any
-                var old = document.getElementById('__eb_pagination_style');
-                if (old) old.remove();
+        /// JS that detects scrolling past the end or before the beginning of a chapter,
+        /// and posts a message to Swift to advance to the next/previous chapter.
+        /// Uses an accumulator pattern so a single small scroll doesn't trigger.
+        private static let chapterBoundaryJS = """
+        (function() {
+            if (window.__ebChapterBoundary) return;
+            window.__ebChapterBoundary = true;
+            var cooldown = false;
+            var boundaryAcc = 0;
+            var boundaryThreshold = 400;
+            var boundaryDir = 0;
 
-                var gap = 40;
-                var colCount = \(columns);
-                var pageWidth = (document.documentElement.clientWidth - gap * (colCount - 1)) / colCount;
+            function fireBoundary(dir) {
+                boundaryAcc = 0;
+                boundaryDir = 0;
+                cooldown = true;
+                setTimeout(function() { cooldown = false; }, 1200);
+                window.webkit.messageHandlers.chapterBoundary.postMessage(dir);
+            }
 
-                var style = document.createElement('style');
-                style.id = '__eb_pagination_style';
-                style.textContent = `
-                    html, body {
-                        height: 100% !important;
-                        overflow: hidden !important;
-                        margin: 0 !important;
-                        padding: 20px !important;
-                        box-sizing: border-box !important;
+            document.addEventListener('wheel', function(e) {
+                if ((window.__ebPaginated && !window.__ebScrollMode) || cooldown) return;
+                var delta = e.deltaY;
+                var scrollable = document.body.scrollHeight - window.innerHeight;
+
+                if (scrollable <= 5) {
+                    if ((delta > 0 && boundaryDir < 0) || (delta < 0 && boundaryDir > 0)) {
+                        boundaryAcc = 0;
                     }
-                    body {
-                        column-count: ${colCount} !important;
-                        column-gap: ${gap}px !important;
-                        column-fill: auto !important;
-                    }
-                `;
-                document.head.appendChild(style);
-
-                // Pagination state
-                window.__ebPaginated = true;
-                window.__ebCurrentPage = 0;
-                window.__ebColumnCount = colCount;
-                var fullWidth = document.body.scrollWidth;
-                var viewportWidth = document.documentElement.clientWidth;
-                // Each "screen" shows colCount columns
-                window.__ebTotalPages = Math.max(1, Math.ceil(fullWidth / viewportWidth));
-                window.__ebPageWidth = viewportWidth;
-
-                // Navigate to page
-                window.__ebGoToPage = function(page) {
-                    page = Math.max(0, Math.min(page, window.__ebTotalPages - 1));
-                    window.__ebCurrentPage = page;
-                    document.body.style.transform = 'translateX(' + (-page * window.__ebPageWidth) + 'px)';
-                    window.webkit.messageHandlers.paginationState.postMessage(
-                        JSON.stringify({current: page, total: window.__ebTotalPages})
-                    );
-                };
-
-                // Arrow key handling
-                if (!window.__ebKeyHandler) {
-                    window.__ebKeyHandler = true;
-                    document.addEventListener('keydown', function(e) {
-                        if (!window.__ebPaginated) return;
-                        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
-                            e.preventDefault();
-                            window.__ebGoToPage(window.__ebCurrentPage + 1);
-                        } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
-                            e.preventDefault();
-                            window.__ebGoToPage(window.__ebCurrentPage - 1);
-                        }
-                    });
-                    // Scroll wheel in paginated mode — accumulate delta for resistance
-                    var scrollAcc = 0;
-                    var scrollThreshold = 80;
-                    document.addEventListener('wheel', function(e) {
-                        if (!window.__ebPaginated) return;
-                        e.preventDefault();
-                        var delta = e.deltaY || e.deltaX;
-                        scrollAcc += delta;
-                        if (scrollAcc > scrollThreshold) {
-                            scrollAcc = 0;
-                            window.__ebGoToPage(window.__ebCurrentPage + 1);
-                        } else if (scrollAcc < -scrollThreshold) {
-                            scrollAcc = 0;
-                            window.__ebGoToPage(window.__ebCurrentPage - 1);
-                        }
-                    }, {passive: false});
+                    boundaryAcc += delta;
+                    boundaryDir = delta > 0 ? 1 : -1;
+                    if (boundaryAcc > boundaryThreshold) fireBoundary('next');
+                    else if (boundaryAcc < -boundaryThreshold) fireBoundary('prev');
+                    return;
                 }
 
-                // Report initial state
-                window.__ebGoToPage(0);
-            })();
-            """
-        }
+                var atBottom = (window.scrollY >= scrollable - 2);
+                var atTop = (window.scrollY <= 2);
+
+                if (atBottom && delta > 0) {
+                    if (boundaryDir !== 1) { boundaryAcc = 0; boundaryDir = 1; }
+                    boundaryAcc += delta;
+                    if (boundaryAcc > boundaryThreshold) fireBoundary('next');
+                } else if (atTop && delta < 0) {
+                    if (boundaryDir !== -1) { boundaryAcc = 0; boundaryDir = -1; }
+                    boundaryAcc += delta;
+                    if (boundaryAcc < -boundaryThreshold) fireBoundary('prev');
+                } else {
+                    boundaryAcc = 0;
+                    boundaryDir = 0;
+                }
+            }, {passive: true});
+        })();
+        """
+
+        // MARK: - Pagination JS (Calibre-style column layout)
+
+        /// Paginated mode: CSS columns with scrollLeft navigation.
+        /// `colsPerScreen` = 1 for single-page, 2 for two-page spread.
+        /// Uses column-width (not column-count) for precise sizing like Calibre.
+        private static func paginatedModeJS(colsPerScreen: Int) -> String { """
+        (function() {
+            var old = document.getElementById('__eb_pagination_style');
+            if (old) old.remove();
+            document.body.style.transform = '';
+
+            var vpW = document.documentElement.clientWidth;
+            var vpH = document.documentElement.clientHeight;
+            var margin = 60;
+            var blockMargin = 20;
+            var gap = 80;
+            var cols = \(colsPerScreen);
+            var contentH = vpH - 2 * blockMargin;
+            var usableW = vpW - 2 * margin;
+            var colW = cols === 1 ? usableW : Math.floor((usableW - gap * (cols - 1)) / cols);
+            var colAndGap = colW + gap;
+            var pageScroll = colAndGap * cols;
+
+            var style = document.createElement('style');
+            style.id = '__eb_pagination_style';
+            style.textContent =
+                'html { height:100%!important; overflow:hidden!important; margin:0!important; padding:0!important; }' +
+                'body { margin:0!important; padding:' + blockMargin + 'px ' + margin + 'px!important;' +
+                ' height:' + contentH + 'px!important;' +
+                ' column-width:' + colW + 'px!important; column-gap:' + gap + 'px!important;' +
+                ' column-fill:auto!important; box-sizing:content-box!important;' +
+                ' overflow-wrap:break-word!important; -webkit-margin-collapse:separate!important;' +
+                ' overflow:visible!important; min-width:0!important; max-width:none!important; }' +
+                'p,li,blockquote,h1,h2,h3,h4,h5,h6,figure,pre,table,dl,dt,dd { break-inside:avoid!important; }' +
+                'img,svg,video { max-height:' + contentH + 'px!important; max-width:' + colW + 'px!important; break-inside:avoid!important; }';
+            document.head.appendChild(style);
+
+            window.__ebPaginated = true;
+            window.__ebScrollMode = false;
+            window.__ebCurrentPage = 0;
+
+            requestAnimationFrame(function() {
+                var totalCols = Math.max(1, Math.round(document.body.scrollWidth / colAndGap));
+                window.__ebTotalPages = Math.max(1, Math.ceil(totalCols / cols));
+                window.__ebPageSize = pageScroll;
+                // Respect pending page (set by Swift before pagination for zero-flash backward nav)
+                var startPage = 0;
+                if (window.__ebPendingPage === -1) { startPage = window.__ebTotalPages - 1; }
+                else if (window.__ebPendingPage > 0) { startPage = window.__ebPendingPage; }
+                window.__ebPendingPage = undefined;
+                window.__ebGoToPage(startPage);
+            });
+
+            window.__ebGoToPage = function(page) {
+                if (page < 0) {
+                    if (!window.__ebBoundaryCooldown) {
+                        window.__ebBoundaryCooldown = true;
+                        setTimeout(function(){ window.__ebBoundaryCooldown = false; }, 1500);
+                        window.webkit.messageHandlers.chapterBoundary.postMessage('prev');
+                    }
+                    return;
+                }
+                if (page >= window.__ebTotalPages) {
+                    if (!window.__ebBoundaryCooldown) {
+                        window.__ebBoundaryCooldown = true;
+                        setTimeout(function(){ window.__ebBoundaryCooldown = false; }, 1500);
+                        window.webkit.messageHandlers.chapterBoundary.postMessage('next');
+                    }
+                    return;
+                }
+                window.__ebCurrentPage = page;
+                var pos = page * window.__ebPageSize;
+                var maxPos = document.body.scrollWidth - document.documentElement.clientWidth;
+                if (maxPos > 0 && pos > maxPos) {
+                    pos = Math.floor(maxPos / window.__ebPageSize) * window.__ebPageSize;
+                }
+                document.documentElement.scrollLeft = Math.max(0, pos);
+                window.webkit.messageHandlers.paginationState.postMessage(
+                    JSON.stringify({current: page, total: window.__ebTotalPages})
+                );
+            };
+
+            if (!window.__ebKeyHandler) {
+                window.__ebKeyHandler = true;
+                document.addEventListener('keydown', function(e) {
+                    if (!window.__ebPaginated) return;
+                    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); window.__ebGoToPage(window.__ebCurrentPage + 1); }
+                    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); window.__ebGoToPage(window.__ebCurrentPage - 1); }
+                });
+                var scrollAcc = 0;
+                document.addEventListener('wheel', function(e) {
+                    if (!window.__ebPaginated || window.__ebScrollMode) return;
+                    e.preventDefault();
+                    scrollAcc += e.deltaY;
+                    if (scrollAcc > 120) { scrollAcc = 0; window.__ebGoToPage(window.__ebCurrentPage + 1); }
+                    else if (scrollAcc < -120) { scrollAcc = 0; window.__ebGoToPage(window.__ebCurrentPage - 1); }
+                }, {passive: false});
+            }
+        })();
+        """ }
+
+        /// Scroll mode: plain vertical scrolling through the entire book. No pagination.
+        /// Chapter detection via IntersectionObserver on .eb-chapter divs.
+        private static let scrollPaginationJS = """
+        (function() {
+            var old = document.getElementById('__eb_pagination_style');
+            if (old) old.remove();
+            document.body.style.transform = '';
+            document.body.style.position = '';
+            document.body.style.top = '';
+            document.body.style.left = '';
+            document.body.style.width = '';
+            document.body.style.zIndex = '';
+            document.body.style.boxShadow = '';
+            document.documentElement.scrollLeft = 0;
+            var oldSpacer = document.getElementById('__eb_spacer');
+            if (oldSpacer) oldSpacer.remove();
+
+            // Resolve relative resource URLs in combined chapter divs
+            document.querySelectorAll('.eb-chapter[data-base]').forEach(function(ch) {
+                var base = ch.dataset.base || '';
+                if (!base) return;
+                ch.querySelectorAll('[src]').forEach(function(el) {
+                    var s = el.getAttribute('src');
+                    if (s && !s.startsWith('http') && !s.startsWith('data:') && !s.startsWith('/')) {
+                        el.setAttribute('src', base + s);
+                    }
+                });
+                ch.querySelectorAll('link[href]').forEach(function(el) {
+                    var h = el.getAttribute('href');
+                    if (h && !h.startsWith('http') && !h.startsWith('#') && !h.startsWith('/')) {
+                        el.setAttribute('href', base + h);
+                    }
+                });
+            });
+
+            var vpH = document.documentElement.clientHeight;
+            var style = document.createElement('style');
+            style.id = '__eb_pagination_style';
+            style.textContent =
+                'html { overflow-y:auto!important; overflow-x:hidden!important; margin:0!important; padding:0!important; }' +
+                'body { margin:0!important; padding:20px 60px!important; overflow-wrap:break-word!important; }' +
+                'html::-webkit-scrollbar { width:8px; }' +
+                ' html::-webkit-scrollbar-thumb { background:rgba(128,128,128,0.3); border-radius:4px; }';
+            document.head.appendChild(style);
+
+            window.__ebPaginated = false;
+            window.__ebScrollMode = true;
+            window.__ebCurrentPage = 0;
+            window.__ebPageSize = vpH;
+
+            requestAnimationFrame(function() {
+                window.__ebTotalPages = Math.max(1, Math.ceil(document.body.scrollHeight / vpH));
+                window.webkit.messageHandlers.paginationState.postMessage(
+                    JSON.stringify({current: 0, total: window.__ebTotalPages})
+                );
+            });
+
+            // Track scroll for page counter and chapter detection
+            var scrollDebounce;
+            var lastChapter = -1;
+            document.addEventListener('scroll', function() {
+                if (!window.__ebScrollMode) return;
+                clearTimeout(scrollDebounce);
+                scrollDebounce = setTimeout(function() {
+                    var page = Math.round(document.documentElement.scrollTop / vpH);
+                    page = Math.max(0, Math.min(page, window.__ebTotalPages - 1));
+                    if (page !== window.__ebCurrentPage) {
+                        window.__ebCurrentPage = page;
+                        window.webkit.messageHandlers.paginationState.postMessage(
+                            JSON.stringify({current: page, total: window.__ebTotalPages})
+                        );
+                    }
+                    var chapters = document.querySelectorAll('.eb-chapter');
+                    var centerY = document.documentElement.scrollTop + vpH / 2;
+                    for (var i = chapters.length - 1; i >= 0; i--) {
+                        if (chapters[i].offsetTop <= centerY) {
+                            if (i !== lastChapter) {
+                                lastChapter = i;
+                                window.webkit.messageHandlers.scrollPosition.postMessage(
+                                    JSON.stringify({chapter: i, totalChapters: chapters.length})
+                                );
+                            }
+                            break;
+                        }
+                    }
+                }, 100);
+            }, true);
+        })();
+        """
 
         /// JS to remove pagination and restore free scroll
         private static let removePaginationJS = """
         (function() {
             var old = document.getElementById('__eb_pagination_style');
             if (old) old.remove();
+            var spacer = document.getElementById('__eb_spacer');
+            if (spacer) spacer.remove();
             document.body.style.transform = '';
+            document.body.style.position = '';
+            document.body.style.top = '';
+            document.body.style.left = '';
+            document.body.style.width = '';
+            document.body.style.zIndex = '';
+            document.body.style.boxShadow = '';
+            document.documentElement.scrollLeft = 0;
             window.__ebPaginated = false;
+            window.__ebScrollMode = false;
             window.__ebCurrentPage = 0;
             window.__ebTotalPages = 0;
         })();
@@ -539,13 +783,20 @@ extension WebReaderView {
 
         func applyViewMode() {
             guard let webView else { return }
+            let isEpub: Bool
+            if case .epubChapter = content { isEpub = true } else { isEpub = false }
+
             switch viewMode {
             case .freeScroll:
-                webView.evaluateJavaScript(Self.removePaginationJS, completionHandler: nil)
+                if isEpub {
+                    webView.evaluateJavaScript(Self.scrollPaginationJS, completionHandler: nil)
+                } else {
+                    webView.evaluateJavaScript(Self.removePaginationJS, completionHandler: nil)
+                }
             case .singlePage:
-                webView.evaluateJavaScript(Self.paginationSetupJS(columns: 1), completionHandler: nil)
+                webView.evaluateJavaScript(Self.paginatedModeJS(colsPerScreen: 1), completionHandler: nil)
             case .twoPage:
-                webView.evaluateJavaScript(Self.paginationSetupJS(columns: 2), completionHandler: nil)
+                webView.evaluateJavaScript(Self.paginatedModeJS(colsPerScreen: 2), completionHandler: nil)
             }
         }
 
@@ -559,7 +810,15 @@ extension WebReaderView {
 
         nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             Task { @MainActor in
+                let goingToLastPage = self.pendingStartAtEnd
+                if goingToLastPage {
+                    self.pendingStartAtEnd = false
+                    // Hide body immediately to prevent flash of page 1
+                    _ = try? await webView.evaluateJavaScript("document.body.style.visibility='hidden'; window.__ebPendingPage = -1;")
+                }
+
                 _ = try? await webView.evaluateJavaScript(Self.scrollTrackingJS)
+                _ = try? await webView.evaluateJavaScript(Self.chapterBoundaryJS)
                 _ = try? await webView.evaluateJavaScript(Self.annotationSelectionJS)
 
                 // Apply theme and font size
@@ -572,10 +831,19 @@ extension WebReaderView {
                 // Restore annotations
                 applyAnnotations()
 
-                // Apply pagination if needed
-                if viewMode != .freeScroll {
+                // Apply pagination
+                let isEpub: Bool
+                if case .epubChapter = self.content { isEpub = true } else { isEpub = false }
+                let needsPagination = viewMode != .freeScroll || isEpub
+
+                if needsPagination {
                     try? await Task.sleep(for: .milliseconds(50))
                     applyViewMode()
+                    // Show body after pagination has positioned to correct page
+                    if goingToLastPage {
+                        try? await Task.sleep(for: .milliseconds(100))
+                        _ = try? await webView.evaluateJavaScript("document.body.style.visibility='visible';")
+                    }
                 } else if let fraction = content?.scrollFraction, fraction > 0 {
                     let js = "window.scrollTo(0, \(fraction) * (document.body.scrollHeight - window.innerHeight));"
                     try? await Task.sleep(for: .milliseconds(100))
@@ -638,6 +906,16 @@ extension WebReaderView {
             MainActor.assumeIsolated {
                 switch message.name {
                 case "scrollPosition":
+                    // Combined scroll mode sends JSON with chapter info
+                    if let jsonString = message.body as? String,
+                       let data = jsonString.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let chapter = json["chapter"] as? Int,
+                       let totalChapters = json["totalChapters"] as? Int {
+                        onChapterChange?(chapter, totalChapters)
+                        return
+                    }
+                    // Normal scroll fraction
                     guard let f = message.body as? Double, f >= 0, let content else { return }
                     switch content {
                     case .epubChapter(_, _, let spineIndex, _, _):
@@ -739,6 +1017,18 @@ extension WebReaderView {
                         }
                     }
 
+                case "chapterBoundary":
+                    guard let direction = message.body as? String,
+                          case .epubChapter(_, _, let spineIndex, let total, _) = content else { return }
+                    let newIndex: Int
+                    if direction == "next" {
+                        newIndex = spineIndex + 1
+                    } else {
+                        newIndex = spineIndex - 1
+                    }
+                    guard newIndex >= 0, newIndex < total else { return }
+                    onChapterAdvance?(newIndex, direction == "prev")
+
                 default:
                     break
                 }
@@ -746,6 +1036,32 @@ extension WebReaderView {
         }
 
         // MARK: - Navigation
+
+        /// Directly loads a new ePub spine item into the WKWebView, bypassing SwiftUI's update cycle.
+        @objc func handleSpineNavigation(_ notification: Notification) {
+            guard let spineIndex = notification.object as? Int,
+                  let epubContent,
+                  let webView,
+                  spineIndex >= 0, spineIndex < epubContent.spine.count else { return }
+
+            let startAtEnd = (notification.userInfo?["startAtEnd"] as? Bool) == true
+            pendingStartAtEnd = startAtEnd
+
+            let href = epubContent.spine[spineIndex].href
+            let chapterURL = epubContent.opfDirectoryURL.appendingPathComponent(href)
+            let baseURL = epubContent.extractedBaseURL
+
+            content = .epubChapter(
+                chapterURL: chapterURL,
+                baseURL: baseURL,
+                spineIndex: spineIndex,
+                totalSpineItems: epubContent.spine.count,
+                scrollFraction: startAtEnd ? 1.0 : 0
+            )
+
+            webView.loadFileURL(chapterURL, allowingReadAccessTo: baseURL)
+            onChapterChange?(spineIndex, epubContent.spine.count)
+        }
 
         @objc func handleNavigation(_ notification: Notification) {
             guard let target = notification.object as? WebNavigationTargetWrapper else { return }

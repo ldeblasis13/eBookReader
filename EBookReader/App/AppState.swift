@@ -64,6 +64,7 @@ final class AppState {
 
     var readerTheme: ReaderTheme = .normal
     var readerFontSize: Double = 16 // pt, for reflowable content (10…36)
+    var readerViewMode: ReaderViewMode = .singlePage
 
     // MARK: - Collections
 
@@ -140,6 +141,10 @@ final class AppState {
         }
         if let f = UserDefaults.standard.object(forKey: "readerFontSize") as? Double {
             self.readerFontSize = f
+        }
+        if let vm = UserDefaults.standard.string(forKey: "readerViewMode"),
+           let mode = ReaderViewMode(rawValue: vm) {
+            self.readerViewMode = mode
         }
     }
 
@@ -847,6 +852,7 @@ final class AppState {
         UserDefaults.standard.set(pageScrollResistance, forKey: "pageScrollResistance")
         UserDefaults.standard.set(readerTheme.rawValue, forKey: "readerTheme")
         UserDefaults.standard.set(readerFontSize, forKey: "readerFontSize")
+        UserDefaults.standard.set(readerViewMode.rawValue, forKey: "readerViewMode")
         persistTabs()
     }
 

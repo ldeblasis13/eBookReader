@@ -48,7 +48,26 @@ enum ReaderTheme: String, CaseIterable, Codable, Sendable {
         }
     }
 
-    /// CSS injected into WKWebView for theming
+    /// Page background hex for CSS variables (used by scroll gradient)
+    var pageBgHex: String {
+        switch self {
+        case .normal: "#FFFFFF"
+        case .sepia: "#F5EFDC"
+        case .night: "#1A1A1A"
+        }
+    }
+
+    /// Gap/margin background between pages in scroll mode
+    var gapBgHex: String {
+        switch self {
+        case .normal: "#d4d4d4"
+        case .sepia: "#c4b8a0"
+        case .night: "#0a0a0a"
+        }
+    }
+
+    /// CSS injected into WKWebView for theming.
+    /// Uses CSS custom properties so the scroll-mode page gradient stays theme-aware.
     var cssOverride: String {
         let bg: String
         let fg: String
@@ -65,7 +84,8 @@ enum ReaderTheme: String, CaseIterable, Codable, Sendable {
         }
 
         return """
-        html, body { background-color: \(bg) !important; color: \(fg) !important; }
+        :root { --eb-page-bg: \(bg); --eb-gap-bg: \(gapBgHex); }
+        body { background-color: \(bg) !important; color: \(fg) !important; }
         p, span, div, h1, h2, h3, h4, h5, h6, li, td, th, dt, dd, blockquote, pre, code, figcaption, caption, label, summary { color: \(fg) !important; }
         a { color: \(linkColor) !important; }
         img, svg { filter: \(imgFilter) !important; }

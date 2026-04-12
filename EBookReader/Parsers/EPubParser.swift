@@ -107,6 +107,76 @@ actor EPubParser {
         return try? Data(contentsOf: coverURL)
     }
 
+    /// Builds a single HTML document combining all spine items for seamless scroll mode.
+    /// Each chapter's body content is wrapped in a `<div class="eb-chapter">`.
+    /// The file is cached — rebuilt only when missing.
+    func buildCombinedDocument(for content: EPubContent) throws -> URL {
+        let combinedURL = content.opfDirectoryURL.appendingPathComponent("__eb_combined.html")
+
+        if FileManager.default.fileExists(atPath: combinedURL.path) {
+            return combinedURL
+        }
+
+        var styleLinks = Set<String>()
+        var bodyParts: [String] = []
+
+        for (index, spineItem) in content.spine.enumerated() {
+            let chapterURL = content.opfDirectoryURL.appendingPathComponent(spineItem.href)
+            guard let data = try? Data(contentsOf: chapterURL),
+                  let html = String(data: data, encoding: .utf8) else { continue }
+
+            // Chapter's directory relative to the OPF directory
+            let chapterDir: String
+            if let slashIdx = spineItem.href.lastIndex(of: "/") {
+                chapterDir = String(spineItem.href[...slashIdx])
+            } else {
+                chapterDir = ""
+            }
+
+            // Extract <link> stylesheet hrefs, resolve paths relative to OPF dir
+            let linkRE = try! NSRegularExpression(
+                pattern: #"<link[^>]+href=["']([^"']+)["'][^>]*>"#, options: .caseInsensitive)
+            for match in linkRE.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+                if let range = Range(match.range(at: 1), in: html) {
+                    var href = String(html[range])
+                    if !href.hasPrefix("http") && !href.hasPrefix("/") {
+                        href = chapterDir + href
+                    }
+                    styleLinks.insert("<link rel=\"stylesheet\" href=\"\(href)\">")
+                }
+            }
+
+            // Extract body content
+            let body = Self.extractBodyContent(from: html)
+            bodyParts.append(
+                "<div class=\"eb-chapter\" data-chapter=\"\(index)\" data-base=\"\(chapterDir)\">\(body)</div>"
+            )
+        }
+
+        let combined = """
+        <!DOCTYPE html>
+        <html><head><meta charset="UTF-8">
+        \(styleLinks.sorted().joined(separator: "\n"))
+        </head><body>
+        \(bodyParts.joined(separator: "\n"))
+        </body></html>
+        """
+
+        try combined.write(to: combinedURL, atomically: true, encoding: .utf8)
+        logger.info("Built combined document: \(content.spine.count) chapters")
+        return combinedURL
+    }
+
+    /// Extracts content between <body> and </body> tags.
+    private static func extractBodyContent(from html: String) -> String {
+        guard let bodyStart = html.range(of: "<body", options: .caseInsensitive),
+              let tagEnd = html.range(of: ">", range: bodyStart.upperBound..<html.endIndex),
+              let bodyEnd = html.range(of: "</body>", options: [.caseInsensitive, .backwards]) else {
+            return html
+        }
+        return String(html[tagEnd.upperBound..<bodyEnd.lowerBound])
+    }
+
     /// Removes the extracted cache for a book.
     func clearCache(bookID: UUID) {
         let extractDir = Constants.Directories.epubExtractedCache

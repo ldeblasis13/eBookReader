@@ -16,7 +16,7 @@ struct BookReaderView: View {
     @State private var currentPage: Int = 0
     @State private var totalPages: Int = 0
     @State private var pdfDocument: PDFDocument?
-    @State private var readerViewMode: ReaderViewMode = .freeScroll
+    @State private var readerViewMode: ReaderViewMode = .singlePage
 
     // Web reader state (ePub / FB2 / Mobi / CHM)
     @State private var currentChapter: Int = 0
@@ -24,6 +24,7 @@ struct BookReaderView: View {
     @State private var webPaginatedPage: Int = 0
     @State private var webPaginatedTotalPages: Int = 0
     @State private var epubContent: EPubParser.EPubContent?
+    @State private var epubCombinedURL: URL?
     @State private var fb2Content: FB2Parser.FB2Content?
     @State private var mobiContent: MobiParser.MobiContent?
     @State private var chmContent: CHMParser.CHMContent?
@@ -86,15 +87,17 @@ struct BookReaderView: View {
             if !showSearchPanel { searchState.clear() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .ebookReaderNavigateToSpineIndex)) { notification in
+            // Keep webReaderContent in sync for SwiftUI state (the coordinator handles the actual WKWebView load)
             guard let spineIndex = notification.object as? Int,
                   let epubContent,
                   spineIndex >= 0, spineIndex < epubContent.spine.count else { return }
             let chapterURL = epubContent.opfDirectoryURL.appendingPathComponent(
                 epubContent.spine[spineIndex].href
             )
+            currentChapter = spineIndex
             webReaderContent = .epubChapter(
                 chapterURL: chapterURL,
-                baseURL: epubContent.opfDirectoryURL,
+                baseURL: epubContent.extractedBaseURL,
                 spineIndex: spineIndex,
                 totalSpineItems: epubContent.spine.count,
                 scrollFraction: 0
@@ -113,6 +116,37 @@ struct BookReaderView: View {
             return .ignored
         }
         .environment(searchState)
+        .onAppear {
+            readerViewMode = appState.readerViewMode
+        }
+        .onChange(of: readerViewMode) {
+            appState.readerViewMode = readerViewMode
+            appState.persistSettings()
+
+            // ePub: switch between combined doc (scroll) and per-chapter (paginated)
+            if book.format == .epub, let epubContent {
+                if readerViewMode == .freeScroll, let combinedURL = epubCombinedURL {
+                    webReaderContent = .epubChapter(
+                        chapterURL: combinedURL,
+                        baseURL: epubContent.extractedBaseURL,
+                        spineIndex: 0,
+                        totalSpineItems: 1,
+                        scrollFraction: 0
+                    )
+                } else if readerViewMode != .freeScroll {
+                    let si = min(currentChapter, epubContent.spine.count - 1)
+                    let href = epubContent.spine[si].href
+                    let chapterURL = epubContent.opfDirectoryURL.appendingPathComponent(href)
+                    webReaderContent = .epubChapter(
+                        chapterURL: chapterURL,
+                        baseURL: epubContent.extractedBaseURL,
+                        spineIndex: si,
+                        totalSpineItems: epubContent.spine.count,
+                        scrollFraction: 0
+                    )
+                }
+            }
+        }
         .task {
             await loadAnnotations()
         }
@@ -159,15 +193,9 @@ struct BookReaderView: View {
             // For reflowable, navigate to the chapter
             if book.format == .epub, let epubContent {
                 let spineIndex = min(chapterIndex, epubContent.spine.count - 1)
-                let chapterURL = epubContent.opfDirectoryURL.appendingPathComponent(
-                    epubContent.spine[spineIndex].href
-                )
-                webReaderContent = .epubChapter(
-                    chapterURL: chapterURL,
-                    baseURL: epubContent.opfDirectoryURL,
-                    spineIndex: spineIndex,
-                    totalSpineItems: epubContent.spine.count,
-                    scrollFraction: 0
+                NotificationCenter.default.post(
+                    name: .ebookReaderNavigateToSpineIndex,
+                    object: spineIndex
                 )
             }
         }
@@ -353,7 +381,15 @@ struct BookReaderView: View {
             showSearch: $showSearchPanel,
             readerViewMode: $readerViewMode,
             hasTOC: hasTOC,
-            pageLabel: (book.format == .pdf || isWebPaginated) ? "Page" : "Chapter"
+            pageLabel: (book.format == .pdf || isWebPaginated) ? "Page" : "Chapter",
+            chapterNav: book.format == .epub && totalChapters > 1
+                ? (current: currentChapter, total: totalChapters) : nil,
+            onChapterChange: book.format == .epub ? { newIndex in
+                NotificationCenter.default.post(
+                    name: .ebookReaderNavigateToSpineIndex,
+                    object: newIndex
+                )
+            } : nil
         )
     }
 
@@ -381,6 +417,9 @@ struct BookReaderView: View {
             let content = try await parser.parse(bookURL: book.fileURL, bookID: book.id)
             epubContent = content
 
+            // Build combined document for scroll mode
+            epubCombinedURL = try? await parser.buildCombinedDocument(for: content)
+
             // Determine which chapter to start with
             let position = ReadingPosition.fromJSON(book.lastReadPosition)
             var spineIndex = 0
@@ -390,11 +429,24 @@ struct BookReaderView: View {
                 scrollFraction = sf
             }
 
+            // Scroll mode: load entire book as one document
+            if readerViewMode == .freeScroll, let combinedURL = epubCombinedURL {
+                webReaderContent = .epubChapter(
+                    chapterURL: combinedURL,
+                    baseURL: content.extractedBaseURL,
+                    spineIndex: 0,
+                    totalSpineItems: 1,
+                    scrollFraction: scrollFraction
+                )
+                return
+            }
+
+            // Paginated modes: load individual chapter
             guard let chapterURL = await parser.chapterURL(for: content, spineIndex: spineIndex) else { return }
 
             webReaderContent = .epubChapter(
                 chapterURL: chapterURL,
-                baseURL: content.opfDirectoryURL,
+                baseURL: content.extractedBaseURL,
                 spineIndex: spineIndex,
                 totalSpineItems: content.spine.count,
                 scrollFraction: scrollFraction
@@ -415,15 +467,10 @@ struct BookReaderView: View {
         if let spineIndex = epubContent.spine.firstIndex(where: { spineItem in
             spineItem.href == filePart || spineItem.href.hasSuffix("/\(filePart)")
         }) {
-            let chapterURL = epubContent.opfDirectoryURL.appendingPathComponent(
-                epubContent.spine[spineIndex].href
-            )
-            webReaderContent = .epubChapter(
-                chapterURL: chapterURL,
-                baseURL: epubContent.opfDirectoryURL,
-                spineIndex: spineIndex,
-                totalSpineItems: epubContent.spine.count,
-                scrollFraction: 0
+            // Use notification so the coordinator loads the chapter directly
+            NotificationCenter.default.post(
+                name: .ebookReaderNavigateToSpineIndex,
+                object: spineIndex
             )
         }
 
