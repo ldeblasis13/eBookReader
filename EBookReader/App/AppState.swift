@@ -649,9 +649,12 @@ final class AppState {
     private func startEmbeddingIndexing() async {
         guard embeddingModelReady, !isEmbeddingIndexing else { return }
 
-        // Load embedding model lazily
+        // Load models lazily
         if let path = await modelDownloadManager.modelPath(id: Constants.Models.embeddingModelId) {
             try? await llmEngine.loadEmbeddingModel(path: path.path)
+        }
+        if llmModelReady, let path = await modelDownloadManager.modelPath(id: Constants.Models.llmModelId) {
+            try? await llmEngine.loadGenerationModel(path: path.path)
         }
 
         isEmbeddingIndexing = true

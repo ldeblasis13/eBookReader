@@ -146,8 +146,14 @@ actor EPubParser {
                 }
             }
 
-            // Extract body content
-            let body = Self.extractBodyContent(from: html)
+            // Extract body content and resolve relative resource paths
+            var body = Self.extractBodyContent(from: html)
+            if !chapterDir.isEmpty {
+                // Resolve src="..." attributes (images, video, audio)
+                body = Self.resolveRelativePaths(in: body, attribute: "src", baseDir: chapterDir)
+                // Resolve href="..." in inline styles and links (but not anchor links)
+                body = Self.resolveRelativePaths(in: body, attribute: "href", baseDir: chapterDir)
+            }
             bodyParts.append(
                 "<div class=\"eb-chapter\" data-chapter=\"\(index)\" data-base=\"\(chapterDir)\">\(body)</div>"
             )
@@ -175,6 +181,50 @@ actor EPubParser {
             return html
         }
         return String(html[tagEnd.upperBound..<bodyEnd.lowerBound])
+    }
+
+    /// Resolves relative paths in HTML attribute values to be relative to the OPF directory.
+    /// E.g., in a chapter at "Text/ch01.xhtml", src="../Images/photo.jpg" → src="Images/photo.jpg"
+    private static func resolveRelativePaths(in html: String, attribute: String, baseDir: String) -> String {
+        // Match attribute="value" where value doesn't start with http, data:, #, or /
+        let pattern = "(\(attribute)=[\"'])([^\"'#][^\"']*?)([\"'])"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+            return html
+        }
+
+        var result = html
+        // Process matches in reverse order to preserve string indices
+        let matches = regex.matches(in: result, range: NSRange(result.startIndex..., in: result))
+        for match in matches.reversed() {
+            guard let fullRange = Range(match.range, in: result),
+                  let valueRange = Range(match.range(at: 2), in: result) else { continue }
+
+            let value = String(result[valueRange])
+            // Skip absolute URLs, data URIs, and anchor-only links
+            if value.hasPrefix("http") || value.hasPrefix("data:") || value.hasPrefix("/") || value.hasPrefix("#") {
+                continue
+            }
+
+            // Resolve the relative path: baseDir + value, then normalize ../
+            var resolved = baseDir + value
+            // Normalize ../ components
+            var components = resolved.split(separator: "/").map(String.init)
+            var normalized: [String] = []
+            for component in components {
+                if component == ".." && !normalized.isEmpty {
+                    normalized.removeLast()
+                } else if component != "." {
+                    normalized.append(component)
+                }
+            }
+            resolved = normalized.joined(separator: "/")
+
+            let prefix = String(result[Range(match.range(at: 1), in: result)!])
+            let suffix = String(result[Range(match.range(at: 3), in: result)!])
+            result.replaceSubrange(fullRange, with: "\(prefix)\(resolved)\(suffix)")
+        }
+
+        return result
     }
 
     /// Removes the extracted cache for a book.

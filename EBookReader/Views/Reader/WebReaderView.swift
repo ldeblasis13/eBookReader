@@ -545,23 +545,8 @@ extension WebReaderView {
             var oldSpacer = document.getElementById('__eb_spacer');
             if (oldSpacer) oldSpacer.remove();
 
-            // Resolve relative resource URLs in combined chapter divs
-            document.querySelectorAll('.eb-chapter[data-base]').forEach(function(ch) {
-                var base = ch.dataset.base || '';
-                if (!base) return;
-                ch.querySelectorAll('[src]').forEach(function(el) {
-                    var s = el.getAttribute('src');
-                    if (s && !s.startsWith('http') && !s.startsWith('data:') && !s.startsWith('/')) {
-                        el.setAttribute('src', base + s);
-                    }
-                });
-                ch.querySelectorAll('link[href]').forEach(function(el) {
-                    var h = el.getAttribute('href');
-                    if (h && !h.startsWith('http') && !h.startsWith('#') && !h.startsWith('/')) {
-                        el.setAttribute('href', base + h);
-                    }
-                });
-            });
+            // Resource URLs are resolved at build time in EPubParser.buildCombinedDocument()
+            // — no runtime resolution needed here.
 
             var vpH = document.documentElement.clientHeight;
             var style = document.createElement('style');

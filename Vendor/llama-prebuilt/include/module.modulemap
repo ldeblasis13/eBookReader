@@ -1,5 +1,16 @@
-module LlamaCpp {
-    header "llama.h"
+module LlamaCpp [system] {
     header "ggml.h"
+    header "ggml-alloc.h"
+    header "ggml-backend.h"
+    header "ggml-cpu.h"
+    header "ggml-opt.h"
+    header "gguf.h"
+    header "llama.h"
+    link "llama"
+    link "ggml"
+    link "ggml-base"
+    link "ggml-cpu"
+    link "ggml-metal"
+    link "ggml-blas"
     export *
 }
