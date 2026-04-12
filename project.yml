@@ -36,6 +36,19 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_HARDENED_RUNTIME: YES
         SWIFT_STRICT_CONCURRENCY: complete
+        SWIFT_INCLUDE_PATHS: "$(SRCROOT)/Vendor/llama-prebuilt/include"
+        LIBRARY_SEARCH_PATHS: "$(SRCROOT)/Vendor/llama-prebuilt/lib"
+        OTHER_LDFLAGS:
+          - "-lllama"
+          - "-lggml"
+          - "-lggml-base"
+          - "-lggml-cpu"
+          - "-lggml-metal"
+          - "-lggml-blas"
+          - "-lc++"
+          - "-framework Accelerate"
+          - "-framework Metal"
+          - "-framework MetalKit"
     dependencies:
       - package: GRDB
       - package: ZIPFoundation

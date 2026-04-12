@@ -98,12 +98,27 @@ final class AppState {
     var isIndexing: Bool = false
     var indexingProgress: (done: Int, total: Int) = (0, 0)
 
+    // MARK: - Model / Embedding State
+
+    var isDownloadingModels: Bool = false
+    var modelDownloadProgress: ModelDownloadManager.DownloadProgress?
+    var embeddingModelReady: Bool = false
+    var llmModelReady: Bool = false
+    var isEmbeddingIndexing: Bool = false
+    var embeddingIndexingProgress: (done: Int, total: Int) = (0, 0)
+
     // MARK: - Services (initialized in start())
 
     private(set) var repository: BookRepository!
     private(set) var collectionRepository: CollectionRepository!
     private(set) var annotationRepository: AnnotationRepository!
     private(set) var ftsManager: FullTextSearchManager!
+    private(set) var modelDownloadManager: ModelDownloadManager!
+    private(set) var llmEngine: LLMEngine!
+    private(set) var embeddingManager: EmbeddingManager!
+    private(set) var hybridSearchManager: HybridSearchManager!
+    private(set) var chunkRepository: TextChunkRepository!
+    private(set) var modelInfoRepository: ModelInfoRepository!
     let folderScanner = FolderScanner()
     let fileWatcher = FileWatcher()
     let metadataExtractor = MetadataExtractor()
@@ -165,10 +180,27 @@ final class AppState {
         annotationRepository = AnnotationRepository(dbPool: dbPool)
         ftsManager = FullTextSearchManager(dbPool: dbPool)
 
+        // ML / embedding services
+        chunkRepository = TextChunkRepository(dbPool: dbPool)
+        modelInfoRepository = ModelInfoRepository(dbPool: dbPool)
+        modelDownloadManager = ModelDownloadManager(dbPool: dbPool)
+        llmEngine = LLMEngine()
+        let posExtractor = PositionAwareTextExtractor()
+        embeddingManager = EmbeddingManager(dbPool: dbPool, llmEngine: llmEngine, textExtractor: posExtractor)
+        hybridSearchManager = HybridSearchManager(
+            dbPool: dbPool,
+            ftsManager: ftsManager,
+            embeddingManager: embeddingManager,
+            chunkRepository: chunkRepository
+        )
+
         startObservingDatabase()         // synchronous — @MainActor, no await needed
         await resolveAndWatchFolders()
         await restoreTabs()
         await startBackgroundIndexing()
+
+        // Model download + embedding indexing (non-blocking)
+        Task { await checkAndDownloadModels() }
     }
 
     // MARK: - Database Observation
@@ -573,6 +605,57 @@ final class AppState {
         isIndexing = false
     }
 
+    // MARK: - Model Download & Embedding
+
+    private func checkAndDownloadModels() async {
+        await modelDownloadManager.ensureModelsRegistered()
+
+        // Check current status
+        let models = (try? await modelInfoRepository.fetchAll()) ?? []
+        embeddingModelReady = models.first(where: { $0.id == Constants.Models.embeddingModelId })?.isReady ?? false
+        llmModelReady = models.first(where: { $0.id == Constants.Models.llmModelId })?.isReady ?? false
+
+        let pending = models.filter { !$0.isReady }
+        guard !pending.isEmpty else {
+            await startEmbeddingIndexing()
+            return
+        }
+
+        isDownloadingModels = true
+        do {
+            try await modelDownloadManager.downloadAllPendingModels { [weak self] progress in
+                Task { @MainActor [weak self] in
+                    self?.modelDownloadProgress = progress
+                }
+            }
+        } catch {
+            logger.error("Model download failed: \(error)")
+        }
+        isDownloadingModels = false
+
+        embeddingModelReady = await modelDownloadManager.verifyModel(id: Constants.Models.embeddingModelId)
+        llmModelReady = await modelDownloadManager.verifyModel(id: Constants.Models.llmModelId)
+
+        await startEmbeddingIndexing()
+    }
+
+    private func startEmbeddingIndexing() async {
+        guard embeddingModelReady, !isEmbeddingIndexing else { return }
+
+        // Load embedding model lazily
+        if let path = await modelDownloadManager.modelPath(id: Constants.Models.embeddingModelId) {
+            try? await llmEngine.loadEmbeddingModel(path: path.path)
+        }
+
+        isEmbeddingIndexing = true
+        await embeddingManager.indexUnembeddedBooks(from: repository.dbPool) { [weak self] done, total in
+            Task { @MainActor [weak self] in
+                self?.embeddingIndexingProgress = (done, total)
+            }
+        }
+        isEmbeddingIndexing = false
+    }
+
     // MARK: - Tab Management
 
     func openBook(_ book: Book) {
@@ -612,7 +695,10 @@ final class AppState {
         // Remove FTS index entries
         await ftsManager.removeIndex(for: book.id)
 
-        // Remove from database (cascades to bookCollection, annotation)
+        // Remove embedding chunks
+        await embeddingManager.removeIndex(for: book.id)
+
+        // Remove from database (cascades to bookCollection, annotation, textChunk)
         try? await repository.deleteBook(id: book.id)
 
         // Remove thumbnail cache
@@ -795,7 +881,23 @@ final class AppState {
             ftsResults = []
             return
         }
-        ftsResults = await ftsManager.search(query: query, books: books)
+        if embeddingModelReady {
+            // Hybrid search: FTS5 + vector reranking
+            let hybridResults = await hybridSearchManager.search(query: query, books: books)
+            ftsResults = hybridResults.map { hr in
+                FullTextSearchManager.SearchResult(
+                    id: hr.bookId,
+                    title: hr.title,
+                    author: hr.author,
+                    format: hr.format,
+                    snippet: hr.snippet,
+                    rank: -hr.score // convert blended score to negative rank (FTS convention)
+                )
+            }
+        } else {
+            // Fallback to FTS-only
+            ftsResults = await ftsManager.search(query: query, books: books)
+        }
     }
 
     private var searchDebounceTask: Task<Void, Never>?

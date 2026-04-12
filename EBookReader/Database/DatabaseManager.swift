@@ -160,6 +160,46 @@ final class DatabaseManager: Sendable {
             }
         }
 
+        migrator.registerMigration("v6") { db in
+            // Text chunks with embedding vectors for semantic search
+            try db.create(table: "textChunk") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("bookId", .text).notNull()
+                    .references("book", onDelete: .cascade)
+                t.column("chunkIndex", .integer).notNull()
+                t.column("text", .text).notNull()
+                t.column("positionJSON", .text)
+                t.column("embedding", .blob)
+                t.column("dateIndexed", .datetime).notNull()
+            }
+            try db.create(index: "idx_textChunk_bookId", on: "textChunk", columns: ["bookId"])
+            try db.create(
+                index: "idx_textChunk_bookId_chunkIndex",
+                on: "textChunk",
+                columns: ["bookId", "chunkIndex"],
+                unique: true
+            )
+
+            // Track embedding status per book
+            try db.alter(table: "book") { t in
+                t.add(column: "embeddingIndexed", .boolean).notNull().defaults(to: false)
+            }
+
+            // Model download/status tracking
+            try db.create(table: "modelInfo") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("displayName", .text).notNull()
+                t.column("fileName", .text).notNull()
+                t.column("expectedSizeBytes", .integer).notNull()
+                t.column("sha256", .text)
+                t.column("downloadURL", .text).notNull()
+                t.column("localPath", .text)
+                t.column("status", .text).notNull()
+                t.column("downloadedBytes", .integer).notNull().defaults(to: 0)
+                t.column("dateDownloaded", .datetime)
+            }
+        }
+
         return migrator
     }
 }

@@ -73,7 +73,9 @@ struct LibraryView: View {
             libraryToolbar
         }
         .overlay {
-            if appState.isScanning || appState.isIndexing {
+            let showProgress = appState.isScanning || appState.isIndexing
+                || appState.isDownloadingModels || appState.isEmbeddingIndexing
+            if showProgress {
                 VStack {
                     Spacer()
                     HStack {
@@ -83,9 +85,18 @@ struct LibraryView: View {
                             Text("Scanning...")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                        } else if appState.isDownloadingModels, let dp = appState.modelDownloadProgress {
+                            Text("Downloading \(dp.displayName)... \(Int(dp.fraction * 100))%")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         } else if appState.isIndexing {
                             let p = appState.indexingProgress
                             Text("Indexing \(p.done)/\(p.total)...")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else if appState.isEmbeddingIndexing {
+                            let p = appState.embeddingIndexingProgress
+                            Text("Embedding \(p.done)/\(p.total)...")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

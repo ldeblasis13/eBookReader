@@ -23,6 +23,7 @@ struct Book: Identifiable, Codable, Sendable, Hashable {
     var dateLastOpened: Date?
     var lastReadPosition: String?
     var fullTextIndexed: Bool
+    var embeddingIndexed: Bool
 
     init(
         id: UUID = UUID(),
@@ -42,7 +43,8 @@ struct Book: Identifiable, Codable, Sendable, Hashable {
         dateAdded: Date = Date(),
         dateLastOpened: Date? = nil,
         lastReadPosition: String? = nil,
-        fullTextIndexed: Bool = false
+        fullTextIndexed: Bool = false,
+        embeddingIndexed: Bool = false
     ) {
         self.id = id
         self.filePath = filePath
@@ -62,6 +64,7 @@ struct Book: Identifiable, Codable, Sendable, Hashable {
         self.dateLastOpened = dateLastOpened
         self.lastReadPosition = lastReadPosition
         self.fullTextIndexed = fullTextIndexed
+        self.embeddingIndexed = embeddingIndexed
     }
 
     var displayTitle: String {
@@ -98,6 +101,6 @@ extension Book: FetchableRecord, MutablePersistableRecord {
         case id, filePath, fileName, title, author, format, fileSize
         case pageCount, language, publisher, isbn, bookDescription
         case hasCachedThumbnail, bookmarkData, dateAdded, dateLastOpened
-        case lastReadPosition, fullTextIndexed
+        case lastReadPosition, fullTextIndexed, embeddingIndexed
     }
 }
