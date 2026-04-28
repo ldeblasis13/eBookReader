@@ -19,6 +19,7 @@
 		1E7FD7C2F5AADF93B4E2A8A2 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F184D068E3B85EDA4BA7EB3 /* ContentView.swift */; };
 		1EB6C5FD2151602E1B601161 /* WatchedFolder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F1653F28C11ED26BDEB981E /* WatchedFolder.swift */; };
 		203A4B8E1442B117AD5829A7 /* BookRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 729DB4718C7566435F9002E8 /* BookRepositoryTests.swift */; };
+		CB1234567890ABCDEF123451 /* CookbookRetrievalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB1234567890ABCDEF123452 /* CookbookRetrievalTests.swift */; };
 		2F8A01093FE02D37D4FDE175 /* Annotation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29583FDDA1EDC8E19D150614 /* Annotation.swift */; };
 		323D42BC252F2CA9ED8DED5C /* ChatSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBA5C5E676C1EC7FC586FA55 /* ChatSession.swift */; };
 		3755F7588904DA39358E97F9 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C811148A6C107EF81E094901 /* SidebarView.swift */; };
@@ -116,6 +117,7 @@
 		67CC277136266CA1084279D6 /* DatabaseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseManager.swift; sourceTree = "<group>"; };
 		72658F18F895715B6AC4BC87 /* AnnotationListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnnotationListView.swift; sourceTree = "<group>"; };
 		729DB4718C7566435F9002E8 /* BookRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookRepositoryTests.swift; sourceTree = "<group>"; };
+		CB1234567890ABCDEF123452 /* CookbookRetrievalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CookbookRetrievalTests.swift; sourceTree = "<group>"; };
 		742D5C2FE8274AD77221C123 /* ContentPosition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentPosition.swift; sourceTree = "<group>"; };
 		75358525F072FC634BCC23C0 /* CollectionRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollectionRepository.swift; sourceTree = "<group>"; };
 		7FDC1E260CB3465DB584C208 /* EBookReaderTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EBookReaderTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -300,6 +302,7 @@
 			isa = PBXGroup;
 			children = (
 				729DB4718C7566435F9002E8 /* BookRepositoryTests.swift */,
+				CB1234567890ABCDEF123452 /* CookbookRetrievalTests.swift */,
 			);
 			path = DatabaseTests;
 			sourceTree = "<group>";
@@ -523,6 +526,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				203A4B8E1442B117AD5829A7 /* BookRepositoryTests.swift in Sources */,
+				CB1234567890ABCDEF123451 /* CookbookRetrievalTests.swift in Sources */,
 				48852DA90045B2C1A9F99F8C /* LargeLibraryPerformanceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -617,8 +621,10 @@
 					"@executable_path/../Frameworks",
 					"@loader_path/../Frameworks",
 				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.lucadeblasis.EBookReaderTests;
 				SDKROOT = macosx;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Vendor/llama-prebuilt/include";
 				SWIFT_VERSION = 5.9;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/EBookReader.app/Contents/MacOS/EBookReader";
 			};
@@ -754,8 +760,10 @@
 					"@executable_path/../Frameworks",
 					"@loader_path/../Frameworks",
 				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.lucadeblasis.EBookReaderTests;
 				SDKROOT = macosx;
+				SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Vendor/llama-prebuilt/include";
 				SWIFT_VERSION = 5.9;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/EBookReader.app/Contents/MacOS/EBookReader";
 			};

@@ -17,16 +17,43 @@ actor HybridSearchManager {
     /// Weight for FTS5 score vs vector similarity (0 = pure vector, 1 = pure FTS5).
     private let ftsWeight: Double = 0.4
 
+    /// Result of a hybrid search. In cookbook/chunk mode, multiple results may
+    /// come from the same book — each represents a distinct chunk.
     struct HybridSearchResult: Identifiable, Sendable {
         let id: UUID
         let bookId: UUID
         let title: String
         let author: String?
         let format: BookFormat
+        /// Short snippet (~200 chars) suitable for UI cards.
         let snippet: String
+        /// Full chunk text, with optional adjacent-chunk context appended,
+        /// suitable for feeding into the LLM prompt. Never truncated.
+        let fullText: String
         let score: Double
         let chunkId: Int64?
+        let chunkIndex: Int?
         let position: ContentPosition?
+        /// True if this chunk was flagged by RecipeDetector as recipe-like.
+        let isRecipeHit: Bool
+        /// Approximate word count of fullText for diagnostics.
+        var wordCount: Int { fullText.split(separator: " ").count }
+    }
+
+    /// Search options to differentiate general chat vs cookbook mode behavior.
+    struct Options: Sendable {
+        /// If true, return chunk-level results (multiple per book allowed) and
+        /// expand each hit with adjacent chunks for full recipe context.
+        var chunkLevel: Bool = false
+        /// Number of adjacent chunks to fetch on each side of a hit (cookbook mode).
+        var contextWindow: Int = 1
+        /// Maximum number of results to return.
+        var maxResults: Int = 20
+        /// If true, prefer chunks with non-null recipeHint scores.
+        var preferRecipeHints: Bool = false
+
+        static let general = Options(chunkLevel: false, contextWindow: 0, maxResults: 20, preferRecipeHints: false)
+        static let cookbook = Options(chunkLevel: true, contextWindow: 1, maxResults: 12, preferRecipeHints: true)
     }
 
     init(
@@ -43,101 +70,215 @@ actor HybridSearchManager {
 
     // MARK: - Hybrid Search
 
+    /// Convenience: book-level search (general chat). One result per book, snippet preview.
     func search(query: String, books: [Book]) async -> [HybridSearchResult] {
-        // Stage 1: FTS5 keyword search
+        await search(query: query, books: books, options: .general)
+    }
+
+    func search(query: String, books: [Book], options: Options) async -> [HybridSearchResult] {
+        let bookMap = Dictionary(uniqueKeysWithValues: books.map { ($0.id, $0) })
+        let scopedBookIds = Set(books.map(\.id))
+
+        // Stage 1: FTS5 keyword search (book-level snippets)
         let ftsResults = await ftsManager.search(query: query, books: books)
         let ftsBookIds = Set(ftsResults.map(\.id))
+        logger.info("FTS returned \(ftsResults.count) book-level matches across \(ftsBookIds.count) unique books")
 
-        // Stage 2: Embed query and compute vector similarity
-        var vectorScores: [UUID: (score: Float, chunkId: Int64, text: String, position: ContentPosition?)] = [:]
+        // Stage 2: Vector search across chunks
+        var chunkScores: [Int64: (chunk: TextChunk, score: Float, bookId: UUID)] = [:]
 
         do {
             let queryEmbedding = try await embeddingManager.embedQuery(query)
 
-            // Load embeddings for FTS-matched books (or all books if FTS returned nothing)
-            let targetBookIds = ftsBookIds.isEmpty ? Set(books.map(\.id)) : ftsBookIds
-            let chunkVectors = try await chunkRepository.fetchEmbeddingVectors(forBookIds: targetBookIds)
+            // Vector search is scoped to ALL provided books (not just FTS hits) so
+            // semantically-relevant chunks aren't missed when keywords don't match.
+            let chunkVectors = try await chunkRepository.fetchEmbeddingVectors(forBookIds: scopedBookIds)
+            logger.info("Vector pool: \(chunkVectors.count) embedded chunks across \(scopedBookIds.count) books")
 
-            guard !chunkVectors.isEmpty else {
-                // No embeddings available — return FTS-only results
-                return ftsResults.map { fts in
-                    HybridSearchResult(
-                        id: UUID(),
-                        bookId: fts.id,
-                        title: fts.title,
-                        author: fts.author,
-                        format: fts.format,
-                        snippet: fts.snippet,
-                        score: Double(-fts.rank), // FTS5 rank is negative; closer to 0 = better
-                        chunkId: nil,
-                        position: nil
-                    )
+            if !chunkVectors.isEmpty {
+                // Top-K vector matches
+                var scored: [(id: Int64, bookId: UUID, similarity: Float)] = []
+                for cv in chunkVectors {
+                    let chunkEmbedding = TextChunk.dataToEmbedding(cv.embedding)
+                    let sim = LLMEngine.cosineSimilarity(queryEmbedding, chunkEmbedding)
+                    scored.append((id: cv.id, bookId: cv.bookId, similarity: sim))
                 }
-            }
+                scored.sort { $0.similarity > $1.similarity }
 
-            // Compute cosine similarity for each chunk
-            for cv in chunkVectors {
-                let chunkEmbedding = TextChunk.dataToEmbedding(cv.embedding)
-                let similarity = LLMEngine.cosineSimilarity(queryEmbedding, chunkEmbedding)
+                let topK = options.chunkLevel ? min(scored.count, options.maxResults * 3) : min(scored.count, 50)
+                let topChunkIds = Array(scored.prefix(topK)).map(\.id)
 
-                // Keep the highest-scoring chunk per book
-                if let existing = vectorScores[cv.bookId] {
-                    if similarity > existing.score {
-                        // Fetch the chunk text for snippet
-                        vectorScores[cv.bookId] = (
-                            score: similarity,
-                            chunkId: cv.id,
-                            text: "", // will fetch below
-                            position: nil
-                        )
-                    }
-                } else {
-                    vectorScores[cv.bookId] = (
-                        score: similarity,
-                        chunkId: cv.id,
-                        text: "",
-                        position: nil
-                    )
-                }
-            }
-
-            // Fetch full chunk data for top results
-            let topChunkIds = vectorScores.values.map(\.chunkId)
-            if !topChunkIds.isEmpty {
+                // Fetch full chunk data
                 let fullChunks = try await chunkRepository.fetchChunksByIds(topChunkIds)
-                let chunkMap = Dictionary(uniqueKeysWithValues: fullChunks.compactMap { c in
-                    c.id.map { ($0, c) }
-                })
-                for (bookId, var info) in vectorScores {
-                    if let chunk = chunkMap[info.chunkId] {
-                        info.text = String(chunk.text.prefix(200))
-                        info.position = chunk.position
-                        vectorScores[bookId] = info
+                let chunkMap = Dictionary(uniqueKeysWithValues: fullChunks.compactMap { c in c.id.map { ($0, c) } })
+                for s in scored.prefix(topK) {
+                    if let chunk = chunkMap[s.id] {
+                        chunkScores[s.id] = (chunk: chunk, score: s.similarity, bookId: s.bookId)
                     }
                 }
             }
         } catch {
             logger.error("Vector search failed: \(error)")
-            // Fall through to FTS-only results
         }
 
-        // Stage 3: Blend scores
-        let bookMap = Dictionary(uniqueKeysWithValues: books.map { ($0.id, $0) })
+        // Stage 3: Optional recipe-hint boosting
+        var recipeHintIds: Set<Int64> = []
+        if options.preferRecipeHints && !chunkScores.isEmpty {
+            let chunkIds = Array(chunkScores.keys)
+            do {
+                recipeHintIds = try await dbPool.read { db -> Set<Int64> in
+                    let placeholders = chunkIds.map { _ in "?" }.joined(separator: ",")
+                    let sql = "SELECT chunkId FROM recipeHint WHERE chunkId IN (\(placeholders)) AND score >= 0.4"
+                    let arguments = StatementArguments(chunkIds.map { Int64($0) })
+                    let rows = try Row.fetchAll(db, sql: sql, arguments: arguments)
+                    return Set(rows.compactMap { $0["chunkId"] as Int64? })
+                }
+                logger.info("Recipe hints found for \(recipeHintIds.count) of \(chunkIds.count) chunks")
+            } catch {
+                logger.error("Recipe hint lookup failed: \(error)")
+            }
+        }
 
-        // Normalize FTS scores to [0, 1]
-        let ftsScores = ftsResults.map { -$0.rank } // positive values
+        // Stage 4: Build results
+        if options.chunkLevel {
+            return await buildChunkLevelResults(
+                chunkScores: chunkScores,
+                ftsResults: ftsResults,
+                bookMap: bookMap,
+                recipeHintIds: recipeHintIds,
+                options: options
+            )
+        } else {
+            return buildBookLevelResults(
+                chunkScores: chunkScores,
+                ftsResults: ftsResults,
+                bookMap: bookMap,
+                options: options
+            )
+        }
+    }
+
+    // MARK: - Chunk-level (cookbook) result assembly
+
+    private func buildChunkLevelResults(
+        chunkScores: [Int64: (chunk: TextChunk, score: Float, bookId: UUID)],
+        ftsResults: [FullTextSearchManager.SearchResult],
+        bookMap: [UUID: Book],
+        recipeHintIds: Set<Int64>,
+        options: Options
+    ) async -> [HybridSearchResult] {
+        // FTS rank lookup for blending
+        let ftsRankByBook: [UUID: Double] = Dictionary(uniqueKeysWithValues:
+            ftsResults.map { ($0.id, -$0.rank) })
+        let ftsValues = Array(ftsRankByBook.values)
+        let ftsMax = ftsValues.max() ?? 1.0
+        let ftsMin = ftsValues.min() ?? 0.0
+        let ftsRange = max(ftsMax - ftsMin, 0.001)
+
+        // Build candidate list, score-blended, with recipe-hint boost
+        var candidates: [(chunkId: Int64, chunk: TextChunk, score: Double)] = []
+        for (chunkId, info) in chunkScores {
+            let normalizedFTS = ((ftsRankByBook[info.bookId] ?? 0.0) - ftsMin) / ftsRange
+            var blended = ftsWeight * normalizedFTS + (1 - ftsWeight) * Double(info.score)
+            if recipeHintIds.contains(chunkId) {
+                blended += 0.15 // boost recipe-flagged chunks
+            }
+            candidates.append((chunkId: chunkId, chunk: info.chunk, score: blended))
+        }
+        candidates.sort { $0.score > $1.score }
+
+        // Take top N, expand each with adjacent chunks for full recipe context
+        let top = Array(candidates.prefix(options.maxResults))
+        var seenChunkIds = Set<Int64>()
+        var results: [HybridSearchResult] = []
+
+        for cand in top {
+            guard !seenChunkIds.contains(cand.chunkId) else { continue }
+            seenChunkIds.insert(cand.chunkId)
+
+            // Fetch adjacent chunks for full recipe context
+            let expanded: [TextChunk]
+            if options.contextWindow > 0 {
+                expanded = (try? await chunkRepository.fetchChunksAround(
+                    bookId: cand.chunk.bookId,
+                    chunkIndex: cand.chunk.chunkIndex,
+                    window: options.contextWindow
+                )) ?? [cand.chunk]
+                // Mark adjacent chunks as seen so we don't dup-emit them
+                for c in expanded {
+                    if let cid = c.id {
+                        seenChunkIds.insert(cid)
+                    }
+                }
+            } else {
+                expanded = [cand.chunk]
+            }
+
+            // Assemble full text from expanded window
+            let fullText = expanded
+                .sorted { $0.chunkIndex < $1.chunkIndex }
+                .map(\.text)
+                .joined(separator: "\n\n")
+
+            guard let book = bookMap[cand.chunk.bookId] else { continue }
+
+            results.append(HybridSearchResult(
+                id: UUID(),
+                bookId: cand.chunk.bookId,
+                title: book.displayTitle,
+                author: book.author,
+                format: book.format,
+                snippet: String(cand.chunk.text.prefix(200)),
+                fullText: fullText,
+                score: cand.score,
+                chunkId: cand.chunkId,
+                chunkIndex: cand.chunk.chunkIndex,
+                position: cand.chunk.position,
+                isRecipeHit: recipeHintIds.contains(cand.chunkId)
+            ))
+        }
+
+        logger.info("Chunk-level results: \(results.count) chunks, \(results.filter(\.isRecipeHit).count) recipe-hinted, total \(results.reduce(0) { $0 + $1.wordCount }) words")
+        return results
+    }
+
+    // MARK: - Book-level (general chat) result assembly
+
+    private func buildBookLevelResults(
+        chunkScores: [Int64: (chunk: TextChunk, score: Float, bookId: UUID)],
+        ftsResults: [FullTextSearchManager.SearchResult],
+        bookMap: [UUID: Book],
+        options: Options
+    ) -> [HybridSearchResult] {
+        // Collapse to best chunk per book
+        var bestPerBook: [UUID: (chunkId: Int64, chunk: TextChunk, score: Float)] = [:]
+        for (chunkId, info) in chunkScores {
+            if let existing = bestPerBook[info.bookId] {
+                if info.score > existing.score {
+                    bestPerBook[info.bookId] = (chunkId, info.chunk, info.score)
+                }
+            } else {
+                bestPerBook[info.bookId] = (chunkId, info.chunk, info.score)
+            }
+        }
+
+        // Normalize FTS scores
+        let ftsScores = ftsResults.map { -$0.rank }
         let ftsMax = ftsScores.max() ?? 1.0
         let ftsMin = ftsScores.min() ?? 0.0
         let ftsRange = max(ftsMax - ftsMin, 0.001)
 
         var resultMap: [UUID: HybridSearchResult] = [:]
 
-        // Add FTS results
+        // Add FTS results (with vector boost if available)
         for (i, fts) in ftsResults.enumerated() {
             let normalizedFTS = (ftsScores[i] - ftsMin) / ftsRange
-            let vectorInfo = vectorScores[fts.id]
+            let vectorInfo = bestPerBook[fts.id]
             let vectorScore = vectorInfo.map { Double($0.score) } ?? 0.0
             let blended = ftsWeight * normalizedFTS + (1 - ftsWeight) * vectorScore
+
+            let snippet = vectorInfo.map { String($0.chunk.text.prefix(200)) } ?? fts.snippet
+            let fullText = vectorInfo?.chunk.text ?? fts.snippet
 
             resultMap[fts.id] = HybridSearchResult(
                 id: UUID(),
@@ -145,15 +286,18 @@ actor HybridSearchManager {
                 title: fts.title,
                 author: fts.author,
                 format: fts.format,
-                snippet: vectorInfo?.text.isEmpty == false ? vectorInfo!.text : fts.snippet,
+                snippet: snippet,
+                fullText: fullText,
                 score: blended,
                 chunkId: vectorInfo?.chunkId,
-                position: vectorInfo?.position
+                chunkIndex: vectorInfo?.chunk.chunkIndex,
+                position: vectorInfo?.chunk.position,
+                isRecipeHit: false
             )
         }
 
-        // Add vector-only results (books found by embedding but not FTS)
-        for (bookId, info) in vectorScores where resultMap[bookId] == nil {
+        // Add vector-only results
+        for (bookId, info) in bestPerBook where resultMap[bookId] == nil {
             guard let book = bookMap[bookId] else { continue }
             let blended = (1 - ftsWeight) * Double(info.score)
             resultMap[bookId] = HybridSearchResult(
@@ -162,14 +306,16 @@ actor HybridSearchManager {
                 title: book.displayTitle,
                 author: book.author,
                 format: book.format,
-                snippet: info.text,
+                snippet: String(info.chunk.text.prefix(200)),
+                fullText: info.chunk.text,
                 score: blended,
                 chunkId: info.chunkId,
-                position: info.position
+                chunkIndex: info.chunk.chunkIndex,
+                position: info.chunk.position,
+                isRecipeHit: false
             )
         }
 
-        // Stage 4: Sort by blended score descending
         return resultMap.values.sorted { $0.score > $1.score }
     }
 }

@@ -17,7 +17,7 @@ actor PositionAwareTextExtractor {
         let position: ContentPosition
     }
 
-    private let wordLimit = Constants.Models.chunkWordCount // ~400 words
+    private let wordLimit = Constants.Models.chunkWordCount // ~200 words, fits 512-token context
 
     // MARK: - Public API
 

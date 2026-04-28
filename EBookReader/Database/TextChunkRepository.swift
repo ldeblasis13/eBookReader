@@ -55,6 +55,41 @@ actor TextChunkRepository {
         }
     }
 
+    /// Counts embedded chunks for a set of books (diagnostics).
+    func countEmbeddedChunks(forBookIds bookIds: Set<UUID>) throws -> Int {
+        guard !bookIds.isEmpty else { return 0 }
+        return try dbPool.read { db in
+            try TextChunk
+                .filter(bookIds.contains(TextChunk.Columns.bookId))
+                .filter(TextChunk.Columns.embedding != nil)
+                .fetchCount(db)
+        }
+    }
+
+    /// Counts total chunks for a set of books (diagnostics).
+    func countChunks(forBookIds bookIds: Set<UUID>) throws -> Int {
+        guard !bookIds.isEmpty else { return 0 }
+        return try dbPool.read { db in
+            try TextChunk
+                .filter(bookIds.contains(TextChunk.Columns.bookId))
+                .fetchCount(db)
+        }
+    }
+
+    /// Fetches a chunk and its adjacent chunks (±window) for full-context recipe assembly.
+    func fetchChunksAround(bookId: UUID, chunkIndex: Int, window: Int) throws -> [TextChunk] {
+        let lower = max(0, chunkIndex - window)
+        let upper = chunkIndex + window
+        return try dbPool.read { db in
+            try TextChunk
+                .filter(TextChunk.Columns.bookId == bookId)
+                .filter(TextChunk.Columns.chunkIndex >= lower
+                     && TextChunk.Columns.chunkIndex <= upper)
+                .order(TextChunk.Columns.chunkIndex)
+                .fetchAll(db)
+        }
+    }
+
     /// Fetches chunks with embeddings for a set of books (for vector search reranking).
     func fetchEmbeddedChunks(forBookIds bookIds: Set<UUID>, limit: Int = 1000) throws -> [TextChunk] {
         try dbPool.read { db in
@@ -67,19 +102,19 @@ actor TextChunkRepository {
     }
 
     /// Lightweight fetch of just (id, bookId, embedding) for vector search.
+    /// Uses GRDB's parameter binding (NOT raw `.uuidString` interpolation) so
+    /// UUIDs encode the same way they were stored — otherwise BLOB-encoded
+    /// UUIDs in the row never match string literals in the WHERE clause.
     func fetchEmbeddingVectors(forBookIds bookIds: Set<UUID>) throws -> [(id: Int64, bookId: UUID, embedding: Data)] {
-        try dbPool.read { db in
-            let rows = try Row.fetchAll(db, sql: """
-                SELECT id, bookId, embedding FROM textChunk
-                WHERE bookId IN (\(bookIds.map { "'\($0.uuidString)'" }.joined(separator: ",")))
-                AND embedding IS NOT NULL
-                """)
-            return rows.map { row in
-                (
-                    id: row["id"] as Int64,
-                    bookId: UUID(uuidString: row["bookId"] as String)!,
-                    embedding: row["embedding"] as Data
-                )
+        guard !bookIds.isEmpty else { return [] }
+        return try dbPool.read { db in
+            let chunks = try TextChunk
+                .filter(bookIds.contains(TextChunk.Columns.bookId))
+                .filter(TextChunk.Columns.embedding != nil)
+                .fetchAll(db)
+            return chunks.compactMap { chunk in
+                guard let id = chunk.id, let embedding = chunk.embedding else { return nil }
+                return (id: id, bookId: chunk.bookId, embedding: embedding)
             }
         }
     }

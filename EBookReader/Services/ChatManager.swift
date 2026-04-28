@@ -23,7 +23,7 @@ actor ChatManager {
         self.chunkRepository = chunkRepository
     }
 
-    // MARK: - System Prompt
+    // MARK: - System Prompts
 
     private let librarySystemPrompt = """
     You are a librarian assistant with access to the user's personal book library. \
@@ -39,27 +39,42 @@ actor ChatManager {
     """
 
     private let cookbookSystemPrompt = """
-    You are a cookbook assistant. You can ONLY reference recipes that appear in the excerpts below. \
-    ABSOLUTE RULES — VIOLATION MEANS FAILURE: \
-    1. If NO excerpts are provided, respond ONLY with: "I couldn't find any matching recipes in your cookbooks. Try a different search term." \
-    2. NEVER invent a recipe. NEVER reference a book that is not in the excerpts. \
-    3. Only describe recipes you can actually see in the provided text. \
-    4. For each recipe found in the excerpts, present: the recipe name, the book it's from, and any ingredients or instructions visible in the excerpt. \
-    5. If the excerpt only partially describes a recipe, say so and suggest the user open the book to see the full recipe. \
-    6. Number each recipe clearly. \
-    7. If the user mentions ingredients, only show recipes from the excerpts that use those ingredients.
+    You are a recipe extractor for the user's personal cookbook library.
+    The excerpts below are real text from the user's cookbooks. You can ONLY reference what is visible in these excerpts.
+
+    ABSOLUTE RULES — VIOLATING ANY RULE IS A FAILURE:
+    1. NEVER invent a recipe, ingredient, quantity, cooking time, temperature, instruction, or technique.
+    2. NEVER reference a book title or author that does not appear in the excerpts below.
+    3. Each excerpt is labeled with [excerpt N | "Book Title" | id=chunkId]. Cite the book title exactly as shown — do not paraphrase or shorten it.
+    4. For each recipe you find in the excerpts, output it in this exact format:
+
+       Recipe N: <recipe name as it appears>
+       From: <Book Title>
+       Excerpt: [excerpt N]
+       Ingredients (visible in excerpt):
+       - <ingredient 1>
+       - <ingredient 2>
+       ...
+       Instructions (visible in excerpt):
+       <one paragraph or short numbered steps — only what is in the excerpt>
+       Notes: <only if visible in excerpt; otherwise omit>
+       Completeness: <one of "complete recipe" | "partial recipe — open the book for the full version">
+
+    5. If the excerpts contain only a partial recipe (missing ingredients list, missing instructions, missing quantities), mark Completeness as "partial recipe" and DO NOT fill in the gaps.
+    6. If the user asks for a count (e.g. "5 recipes"), return up to that many — but only as many as are actually visible in the excerpts.
+    7. If the user mentions ingredients they have, only show recipes whose visible ingredients include them. Do not infer.
+    8. If NO recipes are visible in the excerpts, respond ONLY with: "No matching recipes found in the provided excerpts."
     """
 
     // MARK: - Send Message
 
-    /// Processes a user message: retrieves relevant context, generates a response.
-    /// Returns the assistant message with book references.
     var debugInfo: String?
 
     func setDebugInfo(_ info: String?) {
         debugInfo = info
     }
 
+    /// Processes a user message: retrieves relevant context, generates a response.
     func sendMessage(
         _ text: String,
         books: [Book],
@@ -67,20 +82,32 @@ actor ChatManager {
         currentBook: Book? = nil,
         isCookbookMode: Bool = false
     ) async -> ChatMessage {
-        // Check if this is a book summarization request about the current book
-        if let book = currentBook, isSummarizationQuery(text) {
+        // Summarization shortcut (general chat only — cookbook mode never summarizes)
+        if !isCookbookMode, let book = currentBook, isSummarizationQuery(text) {
             return await summarizeBook(book)
         }
 
-        // Step 1: Search the library for relevant content
-        // If there's a current book and the query seems book-specific, prioritize it
-        var searchResults = await hybridSearchManager.search(query: text, books: books)
+        // Cookbook mode: hard fail if no books in scope (no library-wide fallback).
+        if isCookbookMode && books.isEmpty {
+            return ChatMessage(
+                role: .assistant,
+                content: "This cookbook collection is empty. Drag some cookbooks into it from the library, then ask me again."
+            )
+        }
 
-        // If we got few results from library-wide search, and a book is open,
-        // also search specifically within the current book
-        if let book = currentBook, searchResults.count < 3 {
-            let bookOnly = await hybridSearchManager.search(query: text, books: [book])
-            // Merge, dedup by bookId, keep highest scores
+        // Diagnostics: how much corpus does cookbook mode actually have?
+        if isCookbookMode {
+            await logCookbookCorpusStats(books: books)
+        }
+
+        // Step 1: Search the library for relevant content.
+        let options: HybridSearchManager.Options = isCookbookMode ? .cookbook : .general
+        var searchResults = await hybridSearchManager.search(query: text, books: books, options: options)
+
+        // For general chat: if scoped search yielded little, also try the open book.
+        // Cookbook mode does NOT fall back outside the selected collection.
+        if !isCookbookMode, let book = currentBook, searchResults.count < 3 {
+            let bookOnly = await hybridSearchManager.search(query: text, books: [book], options: .general)
             var seen = Set(searchResults.map(\.bookId))
             for r in bookOnly where !seen.contains(r.bookId) {
                 searchResults.append(r)
@@ -90,60 +117,119 @@ actor ChatManager {
 
         let topResults = Array(searchResults.prefix(maxContextChunks))
 
-        // If no results found, don't call the LLM — it will just hallucinate
+        // No results → don't call the LLM (it would hallucinate).
         if topResults.isEmpty {
             let noResultsMsg = isCookbookMode
-                ? "I couldn't find any matching recipes in your cookbooks. Make sure your cookbook books have been indexed (check the progress bar in the library). Try different search terms."
+                ? "No matching recipes found in your cookbook collection. The collection has \(books.count) book(s); try different ingredients or a different cuisine, or wait for indexing to complete if it's still running."
                 : "I couldn't find relevant information in your books for that query. Try rephrasing or using different keywords."
             return ChatMessage(role: .assistant, content: noResultsMsg)
         }
 
-        // Step 2: Build the prompt with context
+        // Diagnostics: log what we're sending into the prompt.
+        if isCookbookMode {
+            let totalWords = topResults.reduce(0) { $0 + $1.wordCount }
+            let recipeHits = topResults.filter(\.isRecipeHit).count
+            let chunkIds = topResults.compactMap(\.chunkId)
+            logger.info("Cookbook context: \(topResults.count) chunks, \(recipeHits) recipe-hinted, ~\(totalWords) words, chunkIds=\(chunkIds)")
+        }
+
+        // Step 2: Build prompt with FULL chunk text (never truncated) and stable IDs.
         let prompt = buildPrompt(userQuery: text, context: topResults, history: history, isCookbookMode: isCookbookMode)
 
-        // Step 3: Generate response
+        // Step 3: Generate response. Cookbook mode uses low temperature (extraction task).
+        let temperature: Float = isCookbookMode ? 0.1 : 0.7
+        let topP: Float = isCookbookMode ? 0.5 : 0.9
+
         let responseText: String
         do {
-            responseText = try await llmEngine.generate(prompt: prompt, maxTokens: maxResponseTokens)
+            responseText = try await llmEngine.generate(
+                prompt: prompt,
+                maxTokens: maxResponseTokens,
+                temperature: temperature,
+                topP: topP
+            )
         } catch {
             logger.error("Generation failed: \(error)")
             let extra = debugInfo ?? "no additional info"
             responseText = "Unable to generate: \(error.localizedDescription). Debug: \(extra)"
         }
 
-        // Step 4: Build book references from the context chunks used
-        let references = topResults.compactMap { result -> ChatMessage.BookReference? in
-            // Only include references that have meaningful snippets
-            guard !result.snippet.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return nil
+        // Step 4: Build references.
+        // Cookbook mode: keep ALL chunk references (multiple recipes from same book OK).
+        // General mode: dedupe by book.
+        let references: [ChatMessage.BookReference]
+        if isCookbookMode {
+            references = topResults.compactMap { result in
+                guard !result.snippet.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return ChatMessage.BookReference(
+                    bookId: result.bookId,
+                    bookTitle: result.title,
+                    author: result.author,
+                    snippet: result.snippet,        // short for the card
+                    position: result.position,
+                    isRecipe: true
+                )
             }
-            return ChatMessage.BookReference(
-                bookId: result.bookId,
-                bookTitle: result.title,
-                author: result.author,
-                snippet: result.snippet,
-                position: result.position,
-                isRecipe: isCookbookMode
-            )
-        }
-
-        // Deduplicate references by bookId (keep first/highest-scored per book)
-        var seenBooks = Set<UUID>()
-        let uniqueReferences = references.filter { ref in
-            if seenBooks.contains(ref.bookId) { return false }
-            seenBooks.insert(ref.bookId)
-            return true
+        } else {
+            var seenBooks = Set<UUID>()
+            references = topResults.compactMap { result in
+                guard !result.snippet.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                guard !seenBooks.contains(result.bookId) else { return nil }
+                seenBooks.insert(result.bookId)
+                return ChatMessage.BookReference(
+                    bookId: result.bookId,
+                    bookTitle: result.title,
+                    author: result.author,
+                    snippet: result.snippet,
+                    position: result.position,
+                    isRecipe: false
+                )
+            }
         }
 
         return ChatMessage(
             role: .assistant,
             content: responseText,
-            references: Array(uniqueReferences.prefix(5))
+            references: Array(references.prefix(isCookbookMode ? 10 : 5))
         )
+    }
+
+    // MARK: - Diagnostics
+
+    private func logCookbookCorpusStats(books: [Book]) async {
+        let bookIds = Set(books.map(\.id))
+        let totalChunks = (try? await chunkRepository.countChunks(forBookIds: bookIds)) ?? 0
+        let embeddedChunks = (try? await chunkRepository.countEmbeddedChunks(forBookIds: bookIds)) ?? 0
+        let recipeHints = (try? await dbReadRecipeHintCount(forBookIds: bookIds)) ?? 0
+        logger.info("Cookbook corpus: \(books.count) books, \(totalChunks) chunks, \(embeddedChunks) embedded, \(recipeHints) recipe hints")
+    }
+
+    private func dbReadRecipeHintCount(forBookIds bookIds: Set<UUID>) async throws -> Int {
+        guard !bookIds.isEmpty else { return 0 }
+        // Use GRDB QueryInterface so UUID encoding matches what was stored
+        // (raw `.uuidString` interpolation does NOT match BLOB-encoded UUIDs).
+        let chunkIds = try await chunkRepository.dbPool.read { db -> [Int64] in
+            try TextChunk
+                .filter(bookIds.contains(TextChunk.Columns.bookId))
+                .fetchAll(db)
+                .compactMap(\.id)
+        }
+        guard !chunkIds.isEmpty else { return 0 }
+        return try await chunkRepository.dbPool.read { db in
+            let placeholders = chunkIds.map { _ in "?" }.joined(separator: ",")
+            let arguments = StatementArguments(chunkIds.map { Int64($0) })
+            return (try? Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM recipeHint WHERE chunkId IN (\(placeholders))",
+                arguments: arguments
+            )) ?? 0
+        }
     }
 
     // MARK: - Prompt Building
 
+    /// Builds the LLM prompt. Uses `result.fullText` (NOT snippet) so the model
+    /// sees the complete chunk plus any adjacent context the search expanded into.
     private func buildPrompt(
         userQuery: String,
         context: [HybridSearchManager.HybridSearchResult],
@@ -153,37 +239,39 @@ actor ChatManager {
         let systemPrompt = isCookbookMode ? cookbookSystemPrompt : librarySystemPrompt
         var prompt = "<start_of_turn>user\n\(systemPrompt)\n"
 
-        // Add context excerpts
         if !context.isEmpty {
             prompt += "\nBEGIN BOOK EXCERPTS (this is the ONLY information you may use to answer):\n\n"
             for (i, result) in context.enumerated() {
-                let source = result.author != nil
-                    ? "\(result.title) by \(result.author!)"
-                    : result.title
-                prompt += "--- Excerpt [\(i + 1)] from \"\(source)\" ---\n"
-                prompt += "\(result.snippet)\n\n"
+                let titleEsc = result.title.replacingOccurrences(of: "\"", with: "\\\"")
+                let chunkIdStr = result.chunkId.map(String.init) ?? "n/a"
+                let recipeMark = result.isRecipeHit ? " | recipe-hint" : ""
+                let header = isCookbookMode
+                    ? "[excerpt \(i + 1) | \"\(titleEsc)\" | id=\(chunkIdStr)\(recipeMark)]"
+                    : "--- Excerpt [\(i + 1)] from \"\(titleEsc)\" ---"
+                prompt += "\(header)\n"
+                prompt += "\(result.fullText)\n\n"  // FULL TEXT, NEVER TRUNCATED
             }
             prompt += "END BOOK EXCERPTS\n"
         } else {
             prompt += "\nNo relevant excerpts were found in the user's book library.\n"
         }
 
-        // Add recent conversation history (last 4 exchanges)
-        let recentHistory = history.suffix(8)
-        for msg in recentHistory {
-            switch msg.role {
-            case .user:
-                prompt += "<end_of_turn>\n<start_of_turn>user\n\(msg.content)<end_of_turn>\n"
-            case .assistant:
-                prompt += "<start_of_turn>model\n\(msg.content)<end_of_turn>\n"
-            case .system:
-                break
+        // Conversation history (skip in cookbook mode — extraction is stateless).
+        if !isCookbookMode {
+            let recentHistory = history.suffix(8)
+            for msg in recentHistory {
+                switch msg.role {
+                case .user:
+                    prompt += "<end_of_turn>\n<start_of_turn>user\n\(msg.content)<end_of_turn>\n"
+                case .assistant:
+                    prompt += "<start_of_turn>model\n\(msg.content)<end_of_turn>\n"
+                case .system:
+                    break
+                }
             }
         }
 
-        // Add current query
         prompt += "\nUser question: \(userQuery)<end_of_turn>\n<start_of_turn>model\n"
-
         return prompt
     }
 
@@ -198,11 +286,9 @@ actor ChatManager {
         return keywords.contains(where: { lower.contains($0) })
     }
 
-    /// Summarizes an entire book using map-reduce: batch-summarize chunks, then combine.
     private func summarizeBook(_ book: Book) async -> ChatMessage {
         logger.info("Starting map-reduce summarization for: \(book.displayTitle)")
 
-        // Load all text chunks for this book
         let chunks: [TextChunk]
         do {
             chunks = try await chunkRepository.fetchChunks(forBook: book.id)
@@ -214,7 +300,6 @@ actor ChatManager {
             return ChatMessage(role: .assistant, content: "No indexed text found for \"\(book.displayTitle)\". The book may still be indexing.")
         }
 
-        // Phase 1: Map — summarize batches of chunks
         let batches = buildBatches(from: chunks)
         logger.info("Summarizing \(chunks.count) chunks in \(batches.count) batches")
 
@@ -243,7 +328,6 @@ actor ChatManager {
             }
         }
 
-        // Phase 2: Reduce — combine batch summaries into final summary
         let combinedSummaries = batchSummaries.enumerated()
             .map { "Section \($0.offset + 1): \($0.element)" }
             .joined(separator: "\n\n")
@@ -264,7 +348,6 @@ actor ChatManager {
         do {
             finalSummary = try await llmEngine.generate(prompt: reducePrompt, maxTokens: maxResponseTokens)
         } catch {
-            // Fall back to concatenated batch summaries
             finalSummary = "Summary of \"\(book.displayTitle)\":\n\n" + batchSummaries.joined(separator: "\n\n")
         }
 
@@ -276,14 +359,9 @@ actor ChatManager {
             position: nil
         )
 
-        return ChatMessage(
-            role: .assistant,
-            content: finalSummary,
-            references: [reference]
-        )
+        return ChatMessage(role: .assistant, content: finalSummary, references: [reference])
     }
 
-    /// Groups chunks into batches that fit within the context window.
     private func buildBatches(from chunks: [TextChunk]) -> [[TextChunk]] {
         var batches: [[TextChunk]] = []
         var currentBatch: [TextChunk] = []

@@ -133,11 +133,30 @@ actor LLMEngine {
 
         let vocab = llama_model_get_vocab(model)
 
-        // Tokenize
-        let maxTokens: Int32 = 512
+        // Tokenize. If the text is too long for the embedding context, truncate
+        // by character length and retry rather than failing the whole batch.
+        let maxTokens: Int32 = Int32(Constants.Models.embeddingMaxTokens)
+        var input = text
         var tokens = [llama_token](repeating: 0, count: Int(maxTokens))
-        let nTokens = llama_tokenize(vocab, text, Int32(text.utf8.count), &tokens, maxTokens, true, true)
-        guard nTokens > 0 else { throw LLMEngineError.tokenizationFailed }
+        var nTokens = llama_tokenize(vocab, input, Int32(input.utf8.count), &tokens, maxTokens, true, true)
+
+        // llama_tokenize returns the negated required size when buffer is too small.
+        // Truncate progressively until it fits.
+        var truncations = 0
+        while nTokens < 0 && truncations < 4 {
+            // Cut text by ~25% each iteration
+            let newCount = max(50, input.count * 3 / 4)
+            input = String(input.prefix(newCount))
+            nTokens = llama_tokenize(vocab, input, Int32(input.utf8.count), &tokens, maxTokens, true, true)
+            truncations += 1
+        }
+        if truncations > 0 {
+            logger.warning("Embedding text truncated \(truncations)x to fit context (final tokens: \(nTokens))")
+        }
+        guard nTokens > 0 else {
+            logger.error("Embedding tokenization failed after truncation attempts")
+            throw LLMEngineError.tokenizationFailed
+        }
 
         // Clear memory
         let mem = llama_get_memory(ctx)
@@ -174,7 +193,7 @@ actor LLMEngine {
 
     // MARK: - Generation
 
-    func generate(prompt: String, maxTokens: Int = 1024) throws -> String {
+    func generate(prompt: String, maxTokens: Int = 1024, temperature: Float = 0.7, topP: Float = 0.9) throws -> String {
         try ensureGenerationModelLoaded()
 
         guard let ctx = generationContext, let model = generationModel else {
@@ -215,11 +234,15 @@ actor LLMEngine {
         }
         guard result == 0 else { throw LLMEngineError.inferenceFailed }
 
-        // Create sampler
+        // Create sampler. For low temperature (≤0.05) use greedy sampling for determinism.
         let sampler = llama_sampler_chain_init(llama_sampler_chain_default_params())!
-        llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7))
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9, 1))
-        llama_sampler_chain_add(sampler, llama_sampler_init_dist(UInt32.random(in: 0...UInt32.max)))
+        if temperature <= 0.05 {
+            llama_sampler_chain_add(sampler, llama_sampler_init_greedy())
+        } else {
+            llama_sampler_chain_add(sampler, llama_sampler_init_temp(temperature))
+            llama_sampler_chain_add(sampler, llama_sampler_init_top_p(topP, 1))
+            llama_sampler_chain_add(sampler, llama_sampler_init_dist(UInt32.random(in: 0...UInt32.max)))
+        }
 
         // Generate tokens — hard stop before context overflow
         var output = ""

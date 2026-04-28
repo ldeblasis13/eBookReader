@@ -47,7 +47,13 @@ enum Constants {
         static let llmModelId = "llm-gemma"
         static let embeddingDimension = 384
         static let embeddingBlobSize = 384 * MemoryLayout<Float>.size // 1536
-        static let chunkWordCount = 400 // ~512 tokens for MiniLM context window
+        // 200 words ≈ 280 tokens, comfortably within MiniLM's 512-token context.
+        // Smaller chunks also let us assemble adjacent chunks into recipe-sized
+        // context windows without exceeding the LLM's prompt budget.
+        static let chunkWordCount = 200
+        // Hard ceiling on tokens fed into the embedding model; if a chunk exceeds
+        // this, we truncate before tokenization rather than failing silently.
+        static let embeddingMaxTokens = 480
     }
 
     enum Library {

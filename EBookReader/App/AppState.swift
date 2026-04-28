@@ -131,6 +131,7 @@ final class AppState {
     private(set) var chunkRepository: TextChunkRepository!
     private(set) var modelInfoRepository: ModelInfoRepository!
     private(set) var chatManager: ChatManager!
+    private(set) var recipeDetector: RecipeDetector!
     let folderScanner = FolderScanner()
     let fileWatcher = FileWatcher()
     let metadataExtractor = MetadataExtractor()
@@ -206,6 +207,7 @@ final class AppState {
             chunkRepository: chunkRepository
         )
         chatManager = ChatManager(hybridSearchManager: hybridSearchManager, llmEngine: llmEngine, chunkRepository: chunkRepository)
+        recipeDetector = RecipeDetector(dbPool: dbPool)
 
         startObservingDatabase()         // synchronous — @MainActor, no await needed
         await resolveAndWatchFolders()
@@ -901,6 +903,10 @@ final class AppState {
         if case .collection(collectionId) = sidebarSelection {
             await loadCollectionBooks(collectionId)
         }
+        // If this is a cookbook collection, kick off recipe detection for the new books
+        if let collection = collections.first(where: { $0.id == collectionId }), collection.isCookbook {
+            scheduleRecipeDetection(forBookIds: bookIDs)
+        }
     }
 
     func removeBookFromCollection(bookId: UUID, collectionId: UUID) async {
@@ -912,8 +918,34 @@ final class AppState {
 
     func toggleCookbookType(collectionId: UUID) async {
         guard var collection = collections.first(where: { $0.id == collectionId }) else { return }
-        collection.collectionType = collection.isCookbook ? "default" : "cookbook"
+        let willBeCookbook = !collection.isCookbook
+        collection.collectionType = willBeCookbook ? "cookbook" : "default"
         try? await collectionRepository.updateCollection(collection)
+        // If newly marked as cookbook, run recipe detection on all its books
+        if willBeCookbook {
+            let bookIds = (try? await collectionRepository.fetchBookIDs(inCollection: collectionId)) ?? []
+            scheduleRecipeDetection(forBookIds: bookIds)
+        }
+    }
+
+    /// Indexing progress for the recipe detector (visible in cookbook collections).
+    var recipeDetectionProgress: (done: Int, total: Int) = (0, 0)
+    var isRecipeDetecting: Bool = false
+
+    /// Background task — runs recipe detection in series for a set of books.
+    /// Safe to call multiple times; each call enqueues a fresh detection pass.
+    private func scheduleRecipeDetection(forBookIds bookIds: [UUID]) {
+        guard !bookIds.isEmpty else { return }
+        Task {
+            self.isRecipeDetecting = true
+            self.recipeDetectionProgress = (0, bookIds.count)
+            for (i, bookId) in bookIds.enumerated() {
+                await self.recipeDetector.detectRecipes(forBook: bookId)
+                self.recipeDetectionProgress = (i + 1, bookIds.count)
+            }
+            self.isRecipeDetecting = false
+            self.logger.info("Recipe detection complete for \(bookIds.count) books")
+        }
     }
 
     func loadCollectionBooks(_ collectionId: UUID) async {
@@ -1006,8 +1038,9 @@ final class AppState {
             scopedBooks = books
         }
 
-        // Fallback: if scoped search would have zero books, use all books
-        if scopedBooks.isEmpty {
+        // Fallback: if scoped search would have zero books, use all books —
+        // BUT cookbook mode never falls back outside its collection.
+        if scopedBooks.isEmpty && !isCookbookModeActive {
             logger.warning("Scoped books empty, falling back to all \(self.books.count) books")
             scopedBooks = books
         }
