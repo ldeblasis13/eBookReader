@@ -119,6 +119,34 @@ actor TextChunkRepository {
         }
     }
 
+    /// Direct chunk-level keyword search via SQL LIKE. Used as a cookbook-mode
+    /// fallback when vector search misses (e.g. short queries like "venison")
+    /// or when chunks haven't been embedded yet. Returns chunks whose text
+    /// contains ANY of the supplied keywords (case-insensitive).
+    func searchChunksByKeyword(
+        forBookIds bookIds: Set<UUID>,
+        keywords: [String],
+        limit: Int = 50
+    ) throws -> [TextChunk] {
+        guard !bookIds.isEmpty, !keywords.isEmpty else { return [] }
+        let cleaned = keywords
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { $0.count >= 2 }
+        guard !cleaned.isEmpty else { return [] }
+
+        return try dbPool.read { db in
+            // Build OR-of-LIKEs predicate using GRDB QueryInterface so UUID
+            // encoding matches what was stored.
+            var query = TextChunk.filter(bookIds.contains(TextChunk.Columns.bookId))
+            // SQLite LIKE is case-insensitive for ASCII by default.
+            let likeClauses = cleaned.map { kw in
+                "LOWER(text) LIKE '%\(kw.replacingOccurrences(of: "'", with: "''"))%'"
+            }
+            query = query.filter(sql: "(" + likeClauses.joined(separator: " OR ") + ")")
+            return try query.limit(limit).fetchAll(db)
+        }
+    }
+
     // MARK: - Delete
 
     func deleteChunks(forBook bookId: UUID) throws {

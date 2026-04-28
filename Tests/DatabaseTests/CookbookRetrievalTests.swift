@@ -565,7 +565,68 @@ final class CookbookRetrievalTests: XCTestCase {
         XCTAssertTrue(embeddedFetch.isEmpty)
     }
 
-    // MARK: - Test 8: Scoped Search Doesn't Leak Other Books
+    // MARK: - Test 8a: Keyword Fallback Finds Chunks With No Embedding
+
+    /// Vector search misses on short / very specific queries ("venison",
+    /// "bouillabaisse") and skips chunks that haven't been embedded yet.
+    /// `searchChunksByKeyword` is the safety net — it must surface chunks
+    /// containing the literal keyword even when the embedding column is NULL.
+    func testKeywordFallbackFindsUnembeddedChunks() async throws {
+        let book = try await insertBook(title: "Wild Game Cookery")
+
+        // Two chunks: one explicitly mentions venison, one is unrelated.
+        // Both have NULL embeddings (simulating "indexing not yet finished").
+        let venisonChunk = try await insertChunk(
+            bookId: book.id,
+            chunkIndex: 0,
+            text: "Venison stew with juniper berries: take 1kg venison shoulder, sear on all sides, then braise with red wine for 3 hours.",
+            embedding: nil
+        )
+        let unrelatedChunk = try await insertChunk(
+            bookId: book.id,
+            chunkIndex: 1,
+            text: "An introduction to French sauces: the five mother sauces are béchamel, velouté, espagnole, hollandaise, and tomato.",
+            embedding: nil
+        )
+
+        let scope: Set<UUID> = [book.id]
+
+        // Embedded-vector pool is empty.
+        let vectors = try await chunkRepo.fetchEmbeddingVectors(forBookIds: scope)
+        XCTAssertTrue(vectors.isEmpty, "precondition: no embedded chunks")
+
+        // Keyword fallback MUST find the venison chunk.
+        let hits = try await chunkRepo.searchChunksByKeyword(
+            forBookIds: scope,
+            keywords: ["venison"]
+        )
+        XCTAssertEqual(hits.count, 1, "keyword fallback must find the one chunk containing 'venison'")
+        XCTAssertEqual(hits.first?.id, venisonChunk)
+        XCTAssertNotEqual(hits.first?.id, unrelatedChunk)
+
+        // Multi-keyword OR: query mentions venison and beef → still matches.
+        let multi = try await chunkRepo.searchChunksByKeyword(
+            forBookIds: scope,
+            keywords: ["venison", "beef"]
+        )
+        XCTAssertEqual(multi.count, 1, "OR-of-LIKEs: at least one keyword present is enough")
+
+        // Nonsense keyword → no hits.
+        let none = try await chunkRepo.searchChunksByKeyword(
+            forBookIds: scope,
+            keywords: ["unicornsteak"]
+        )
+        XCTAssertTrue(none.isEmpty, "no chunk contains 'unicornsteak'")
+
+        // Empty scope → empty result regardless of keyword.
+        let outOfScope = try await chunkRepo.searchChunksByKeyword(
+            forBookIds: [],
+            keywords: ["venison"]
+        )
+        XCTAssertTrue(outOfScope.isEmpty, "empty scope must short-circuit")
+    }
+
+    // MARK: - Test 9: Scoped Search Doesn't Leak Other Books
 
     /// Cookbook mode must scope strictly to the selected collection. A second
     /// book outside the scope must never appear in vector results, even if

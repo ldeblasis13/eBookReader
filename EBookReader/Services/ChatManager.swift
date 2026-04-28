@@ -119,9 +119,23 @@ actor ChatManager {
 
         // No results → don't call the LLM (it would hallucinate).
         if topResults.isEmpty {
-            let noResultsMsg = isCookbookMode
-                ? "No matching recipes found in your cookbook collection. The collection has \(books.count) book(s); try different ingredients or a different cuisine, or wait for indexing to complete if it's still running."
-                : "I couldn't find relevant information in your books for that query. Try rephrasing or using different keywords."
+            let noResultsMsg: String
+            if isCookbookMode {
+                // Surface real corpus state so the user can see WHY nothing matched
+                // (zero embedded chunks vs zero recipe-like text vs unlucky query).
+                let bookIds = Set(books.map(\.id))
+                let totalChunks = (try? await chunkRepository.countChunks(forBookIds: bookIds)) ?? 0
+                let embeddedChunks = (try? await chunkRepository.countEmbeddedChunks(forBookIds: bookIds)) ?? 0
+                if totalChunks == 0 {
+                    noResultsMsg = "No indexed text yet for your \(books.count) cookbook(s). Indexing may still be in progress — give it a minute and try again."
+                } else if embeddedChunks == 0 {
+                    noResultsMsg = "Your \(books.count) cookbook(s) have \(totalChunks) text chunks but none are embedded yet. Wait for embedding to finish, then try again."
+                } else {
+                    noResultsMsg = "No matches in your cookbook collection (\(books.count) books, \(totalChunks) chunks, \(embeddedChunks) embedded). Try a different ingredient name, a cuisine, or a dish name."
+                }
+            } else {
+                noResultsMsg = "I couldn't find relevant information in your books for that query. Try rephrasing or using different keywords."
+            }
             return ChatMessage(role: .assistant, content: noResultsMsg)
         }
 

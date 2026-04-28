@@ -121,6 +121,42 @@ actor HybridSearchManager {
             logger.error("Vector search failed: \(error)")
         }
 
+        // Stage 2b: Chunk-level keyword fallback. Vector search misses on
+        // short / specific queries ("venison", "bouillabaisse") and skips
+        // anything that wasn't embedded. Pull chunks whose text directly
+        // contains any of the salient keywords, then merge into chunkScores.
+        // Without this, cookbook mode silently returns nothing whenever the
+        // recipe term doesn't show up in the embedding's nearest neighbours.
+        let keywords = extractKeywords(from: query)
+        if !keywords.isEmpty {
+            do {
+                let kwChunks = try await chunkRepository.searchChunksByKeyword(
+                    forBookIds: scopedBookIds,
+                    keywords: keywords,
+                    limit: options.maxResults * 4
+                )
+                logger.info("Keyword chunk fallback: \(kwChunks.count) chunks contain \(keywords)")
+                for chunk in kwChunks {
+                    guard let id = chunk.id else { continue }
+                    if let existing = chunkScores[id] {
+                        // Already scored by vector — boost it, don't overwrite.
+                        chunkScores[id] = (
+                            chunk: existing.chunk,
+                            score: existing.score + 0.25,
+                            bookId: existing.bookId
+                        )
+                    } else {
+                        // New candidate from keyword match — give it a baseline
+                        // score that ranks below strong vector hits but above
+                        // weak ones.
+                        chunkScores[id] = (chunk: chunk, score: 0.45, bookId: chunk.bookId)
+                    }
+                }
+            } catch {
+                logger.error("Keyword chunk fallback failed: \(error)")
+            }
+        }
+
         // Stage 3: Optional recipe-hint boosting
         var recipeHintIds: Set<Int64> = []
         if options.preferRecipeHints && !chunkScores.isEmpty {
@@ -317,5 +353,33 @@ actor HybridSearchManager {
         }
 
         return resultMap.values.sorted { $0.score > $1.score }
+    }
+
+    // MARK: - Keyword extraction
+
+    /// Strips conversational filler ("find me a", "what's a recipe for") and
+    /// returns the salient nouns that the keyword fallback should match.
+    /// Mirrors FullTextSearchManager's stop list with a few extras specific
+    /// to recipe queries.
+    private static let stopWords: Set<String> = [
+        // generic conversational
+        "find", "me", "a", "an", "the", "is", "are", "was", "were", "be",
+        "and", "or", "not", "for", "with", "from", "to", "in", "on", "at", "of",
+        "i", "my", "we", "you", "it", "its", "this", "that", "some", "any", "all",
+        "want", "need", "give", "show", "get", "make", "have", "has", "do", "does",
+        "can", "could", "would", "should", "will", "about", "what", "how", "which",
+        "like", "please", "just", "very", "really", "also", "so", "but", "if", "then",
+        // recipe-specific filler
+        "recipe", "recipes", "cook", "cooking", "dish", "meal", "food",
+        "tell", "list", "any", "some"
+    ]
+
+    private func extractKeywords(from query: String) -> [String] {
+        query
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { $0.count >= 3 }
+            .filter { !Self.stopWords.contains($0) }
+            .filter { !$0.allSatisfy(\.isNumber) }
     }
 }
