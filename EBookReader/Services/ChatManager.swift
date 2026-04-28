@@ -121,17 +121,22 @@ actor ChatManager {
         if topResults.isEmpty {
             let noResultsMsg: String
             if isCookbookMode {
-                // Surface real corpus state so the user can see WHY nothing matched
-                // (zero embedded chunks vs zero recipe-like text vs unlucky query).
+                // Distinguish "AI index missing" from "everything indexed but
+                // your query found nothing" so the user knows whether to wait,
+                // repair, or rephrase.
                 let bookIds = Set(books.map(\.id))
                 let totalChunks = (try? await chunkRepository.countChunks(forBookIds: bookIds)) ?? 0
                 let embeddedChunks = (try? await chunkRepository.countEmbeddedChunks(forBookIds: bookIds)) ?? 0
-                if totalChunks == 0 {
-                    noResultsMsg = "No indexed text yet for your \(books.count) cookbook(s). Indexing may still be in progress — give it a minute and try again."
+                let ftsCount = (try? await dbCountFTSRows(forBookIds: bookIds)) ?? 0
+
+                if totalChunks == 0 && ftsCount == 0 {
+                    noResultsMsg = "Your \(books.count) cookbook(s) aren't indexed yet — neither full-text nor AI index has any rows. Give indexing a minute and try again. If it stays empty, try right-clicking the collection and choosing Rebuild Index."
+                } else if totalChunks == 0 {
+                    noResultsMsg = "Full-text index is ready (\(ftsCount) rows) but the AI recipe index hasn't run yet for your \(books.count) cookbook(s) (0 chunks). The app should now build it automatically — give it a couple minutes. If nothing changes, right-click the collection → Rebuild Index."
                 } else if embeddedChunks == 0 {
-                    noResultsMsg = "Your \(books.count) cookbook(s) have \(totalChunks) text chunks but none are embedded yet. Wait for embedding to finish, then try again."
+                    noResultsMsg = "Your \(books.count) cookbook(s) have \(totalChunks) text chunks but no embeddings yet. Wait for embedding to finish, then try again."
                 } else {
-                    noResultsMsg = "No matches in your cookbook collection (\(books.count) books, \(totalChunks) chunks, \(embeddedChunks) embedded). Try a different ingredient name, a cuisine, or a dish name."
+                    noResultsMsg = "No matches in your cookbook collection (\(books.count) books, \(totalChunks) chunks, \(embeddedChunks) embedded, \(ftsCount) FTS rows). Try a different ingredient name, a cuisine, or a dish name."
                 }
             } else {
                 noResultsMsg = "I couldn't find relevant information in your books for that query. Try rephrasing or using different keywords."
@@ -215,7 +220,26 @@ actor ChatManager {
         let totalChunks = (try? await chunkRepository.countChunks(forBookIds: bookIds)) ?? 0
         let embeddedChunks = (try? await chunkRepository.countEmbeddedChunks(forBookIds: bookIds)) ?? 0
         let recipeHints = (try? await dbReadRecipeHintCount(forBookIds: bookIds)) ?? 0
-        logger.info("Cookbook corpus: \(books.count) books, \(totalChunks) chunks, \(embeddedChunks) embedded, \(recipeHints) recipe hints")
+        let ftsCount = (try? await dbCountFTSRows(forBookIds: bookIds)) ?? 0
+        logger.info("Cookbook corpus: \(books.count) books, \(totalChunks) chunks, \(embeddedChunks) embedded, \(recipeHints) recipe hints, \(ftsCount) FTS rows")
+    }
+
+    /// Counts ftsContent rows scoped to the given books. The FTS5 table
+    /// stores bookId as text (TextExtractor wrote `book.id.uuidString`),
+    /// so we match against the same string form. Used by the diagnostic
+    /// no-results message to tell the user whether FTS is available even
+    /// when the AI index is empty.
+    private func dbCountFTSRows(forBookIds bookIds: Set<UUID>) async throws -> Int {
+        guard !bookIds.isEmpty else { return 0 }
+        let placeholders = bookIds.map { _ in "?" }.joined(separator: ",")
+        let arguments = StatementArguments(bookIds.map { $0.uuidString })
+        return try await chunkRepository.dbPool.read { db in
+            (try? Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM ftsContent WHERE bookId IN (\(placeholders))",
+                arguments: arguments
+            )) ?? 0
+        }
     }
 
     private func dbReadRecipeHintCount(forBookIds bookIds: Set<UUID>) async throws -> Int {

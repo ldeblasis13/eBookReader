@@ -177,13 +177,52 @@ actor HybridSearchManager {
 
         // Stage 4: Build results
         if options.chunkLevel {
-            return await buildChunkLevelResults(
+            let chunkResults = await buildChunkLevelResults(
                 chunkScores: chunkScores,
                 ftsResults: ftsResults,
                 bookMap: bookMap,
                 recipeHintIds: recipeHintIds,
                 options: options
             )
+
+            // Stage 5 (cookbook fallback): if textChunk-derived results are
+            // empty but FTS5 has hits, the AI index hasn't run yet (or
+            // extraction silently failed). Build chunks straight from
+            // ftsContent so the user gets the venison recipe back instead
+            // of "no matches". This is the difference between "search
+            // works" and "search shrugs because the embedding pipeline
+            // hasn't caught up".
+            if chunkResults.isEmpty && !ftsBookIds.isEmpty {
+                let ftsChunks = await ftsManager.searchChunks(
+                    query: query,
+                    scopedBookIds: scopedBookIds,
+                    limit: options.maxResults
+                )
+                if !ftsChunks.isEmpty {
+                    logger.info("FTS chunk fallback: \(ftsChunks.count) hits used (AI index empty)")
+                    return ftsChunks.compactMap { hit -> HybridSearchResult? in
+                        guard let book = bookMap[hit.bookId] else { return nil }
+                        return HybridSearchResult(
+                            id: UUID(),
+                            bookId: hit.bookId,
+                            title: book.displayTitle,
+                            author: book.author,
+                            format: book.format,
+                            snippet: String(hit.text.prefix(200)),
+                            fullText: hit.text,
+                            // FTS5 rank is negative; flip and clamp so it
+                            // stacks below real vector hits.
+                            score: max(0.3, min(0.6, -hit.rank / 10.0)),
+                            chunkId: nil, // no textChunk row to point at
+                            chunkIndex: hit.chunkIndex,
+                            position: nil,
+                            isRecipeHit: false
+                        )
+                    }
+                }
+            }
+
+            return chunkResults
         } else {
             return buildBookLevelResults(
                 chunkScores: chunkScores,

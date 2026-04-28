@@ -962,6 +962,41 @@ final class AppState {
         }
     }
 
+    /// User-triggered rebuild for a cookbook collection. Wipes the AI
+    /// index (textChunk + recipeHint cascade) and FTS index for every book
+    /// in the collection, resets the indexed flags, then re-runs the full
+    /// pipeline. Use this when a collection is stuck in the "0 chunks"
+    /// state because earlier indexing crashed silently.
+    func rebuildCookbookIndex(collectionId: UUID) async {
+        let bookIds = (try? await collectionRepository.fetchBookIDs(inCollection: collectionId)) ?? []
+        guard !bookIds.isEmpty else {
+            logger.info("Rebuild index: collection has no books")
+            return
+        }
+        logger.info("Rebuild index: clearing \(bookIds.count) books in collection")
+
+        // 1. Drop existing chunks + FTS rows + reset flags.
+        for bookId in bookIds {
+            try? await chunkRepository.deleteChunks(forBook: bookId)
+            await ftsManager.removeIndex(for: bookId)
+        }
+        // Reset both flags via GRDB QueryInterface (raw .uuidString WHERE
+        // would silently fail to match the BLOB-encoded id).
+        try? await repository.dbPool.write { db in
+            _ = try Book
+                .filter(bookIds.contains(Book.Columns.id))
+                .updateAll(
+                    db,
+                    Book.Columns.fullTextIndexed.set(to: false),
+                    Book.Columns.embeddingIndexed.set(to: false)
+                )
+        }
+
+        // 2. Re-run FTS + embedding + recipe detection.
+        await indexNewBooks() // FTS pass — also kicks off embedding in background
+        scheduleCookbookIndexing(forBookIds: bookIds)
+    }
+
     /// Cookbook-onboarding pipeline: ensure every supplied book has been
     /// embedding-indexed (chunks inserted into textChunk + embeddings
     /// computed), THEN run recipe detection on the resulting chunks.

@@ -99,13 +99,18 @@ actor EmbeddingManager {
             }
         }
 
-        // Mark book as embedding-indexed
+        // Mark book as embedding-indexed. MUST use GRDB QueryInterface —
+        // book.id is stored as a 16-byte BLOB by GRDB's default UUID
+        // encoding, so a raw `.uuidString` arg never matches the WHERE
+        // clause. With the bug the flag stayed 0 forever, so every cold
+        // start re-attempted to index the same books (and the
+        // `guard !book.embeddingIndexed` early-return at the top of this
+        // method never fired, masking the real silent failures).
         do {
             try await dbPool.write { db in
-                try db.execute(
-                    sql: "UPDATE book SET embeddingIndexed = 1 WHERE id = ?",
-                    arguments: [book.id.uuidString]
-                )
+                _ = try Book
+                    .filter(Book.Columns.id == book.id)
+                    .updateAll(db, Book.Columns.embeddingIndexed.set(to: true))
             }
         } catch {
             logger.error("Failed to mark book as embedding-indexed: \(error)")

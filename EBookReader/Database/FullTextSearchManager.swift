@@ -26,6 +26,17 @@ actor FullTextSearchManager {
         let rank: Double
     }
 
+    /// Chunk-level FTS hit. Used by cookbook search as a fallback when the
+    /// textChunk / embedding pool is empty (e.g. embedding pipeline didn't
+    /// run yet, or extraction silently produced zero chunks). The text is
+    /// the full FTS chunk (~5000 chars from TextExtractor), not a snippet.
+    struct ChunkHit: Sendable {
+        let bookId: UUID
+        let chunkIndex: Int
+        let text: String
+        let rank: Double
+    }
+
     // MARK: - Indexing
 
     /// Indexes a single book. Call after import.
@@ -48,11 +59,14 @@ actor FullTextSearchManager {
                     )
                 }
 
-                // Mark book as indexed
-                try db.execute(
-                    sql: "UPDATE book SET fullTextIndexed = 1 WHERE id = ?",
-                    arguments: [book.id.uuidString]
-                )
+                // Mark book as indexed. MUST use GRDB QueryInterface (or
+                // typed UUID binding) — book.id is stored as a 16-byte BLOB,
+                // so a raw `.uuidString` arg never matches the WHERE clause
+                // and the flag stays 0 forever (causing every startup to
+                // re-index the same book).
+                _ = try Book
+                    .filter(Book.Columns.id == book.id)
+                    .updateAll(db, Book.Columns.fullTextIndexed.set(to: true))
             }
             logger.info("Indexed \(chunks.count) chunks for \(book.displayTitle)")
         } catch {
@@ -206,6 +220,53 @@ actor FullTextSearchManager {
         }
 
         return results.values.sorted { $0.rank > $1.rank }
+    }
+
+    /// Chunk-level FTS search. Returns the actual matching ftsContent rows
+    /// (text + bookId + chunkIndex + rank), bounded to the supplied book set.
+    /// Used as the cookbook-mode fallback when the embedded textChunk pool
+    /// is empty — the venison recipe is still findable via FTS even when
+    /// embeddings haven't been computed.
+    func searchChunks(query: String, scopedBookIds: Set<UUID>, limit: Int = 50) async -> [ChunkHit] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !scopedBookIds.isEmpty else { return [] }
+        let ftsQuery = buildFTSQuery(trimmed)
+        let scopedStrings = Set(scopedBookIds.map(\.uuidString))
+
+        do {
+            return try await dbPool.read { db -> [ChunkHit] in
+                let rows = try Row.fetchAll(db, sql: """
+                    SELECT bookId, chunkIndex, text, rank
+                    FROM ftsContent
+                    WHERE ftsContent MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                """, arguments: [ftsQuery, limit * 4])
+
+                var hits: [ChunkHit] = []
+                hits.reserveCapacity(min(rows.count, limit))
+                for row in rows {
+                    // FTS5 stores bookId as text (TextExtractor wrote it as
+                    // .uuidString). Filter to scope client-side so we keep
+                    // the GRDB binding sane and avoid re-encoding UUIDs into
+                    // the SQL string.
+                    let bookIdStr = row["bookId"] as String
+                    guard scopedStrings.contains(bookIdStr),
+                          let bookUUID = UUID(uuidString: bookIdStr) else { continue }
+                    hits.append(ChunkHit(
+                        bookId: bookUUID,
+                        chunkIndex: row["chunkIndex"] as Int,
+                        text: row["text"] as String,
+                        rank: row["rank"] as Double
+                    ))
+                    if hits.count >= limit { break }
+                }
+                return hits
+            }
+        } catch {
+            logger.error("Chunk FTS search failed: \(error)")
+            return []
+        }
     }
 
     private static let stopWords: Set<String> = [

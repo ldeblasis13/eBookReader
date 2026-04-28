@@ -212,6 +212,12 @@ struct CollectionSidebarItem: View {
                 Task { await appState.toggleCookbookType(collectionId: collection.id) }
             }
 
+            if collection.isCookbook {
+                Button("Rebuild Index") {
+                    Task { await appState.rebuildCookbookIndex(collectionId: collection.id) }
+                }
+            }
+
             Divider()
 
             Button("Delete", role: .destructive) {

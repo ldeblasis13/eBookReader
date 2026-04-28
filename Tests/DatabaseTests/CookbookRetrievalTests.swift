@@ -626,6 +626,81 @@ final class CookbookRetrievalTests: XCTestCase {
         XCTAssertTrue(outOfScope.isEmpty, "empty scope must short-circuit")
     }
 
+    // MARK: - Test 8b: FTS Chunk Fallback (textChunk empty, ftsContent has hits)
+
+    /// The exact reported failure mode: cookbook collection has 4 books, FTS5
+    /// has 5 venison hits, but textChunk is empty (AI index never finished).
+    /// FullTextSearchManager.searchChunks must surface those FTS rows scoped
+    /// to the cookbook collection so the chat can present them as recipes
+    /// instead of returning "no matches".
+    func testFTSChunkFallbackSurfacesHitsWhenAIIndexIsEmpty() async throws {
+        // Insert two books and FTS rows for both, but NO textChunk rows.
+        let venisonBook = try await insertBook(title: "Game Cookery")
+        let unrelatedBook = try await insertBook(title: "Pastry School")
+
+        // Manually populate ftsContent the same way FullTextSearchManager does
+        // (text + bookId.uuidString + chunkIndex). Two venison rows in the
+        // game book, one in the pastry book that just happens to mention
+        // venison in passing.
+        try await dbPool.write { db in
+            try db.execute(
+                sql: "INSERT INTO ftsContent(text, bookId, chunkIndex) VALUES (?, ?, ?)",
+                arguments: [
+                    "Roast venison loin with juniper crust. Serves 6. Take 1.5kg venison loin...",
+                    venisonBook.id.uuidString,
+                    0
+                ]
+            )
+            try db.execute(
+                sql: "INSERT INTO ftsContent(text, bookId, chunkIndex) VALUES (?, ?, ?)",
+                arguments: [
+                    "Venison stew with red wine. Brown 1kg cubed venison shoulder, then deglaze with 500ml red wine...",
+                    venisonBook.id.uuidString,
+                    1
+                ]
+            )
+            try db.execute(
+                sql: "INSERT INTO ftsContent(text, bookId, chunkIndex) VALUES (?, ?, ?)",
+                arguments: [
+                    "Pâte feuilletée — for game pies, often served with venison.",
+                    unrelatedBook.id.uuidString,
+                    0
+                ]
+            )
+        }
+
+        // Precondition: textChunk is empty for both books.
+        let totalChunks = try await chunkRepo.countChunks(forBookIds: [venisonBook.id, unrelatedBook.id])
+        XCTAssertEqual(totalChunks, 0, "AI index must be empty for this test scenario")
+
+        // Build a real FullTextSearchManager pointed at our test DB.
+        let ftsManager = FullTextSearchManager(dbPool: dbPool)
+
+        // Scope: just the venison book (cookbook collection).
+        let scope: Set<UUID> = [venisonBook.id]
+        let hits = await ftsManager.searchChunks(
+            query: "venison recipe",
+            scopedBookIds: scope,
+            limit: 10
+        )
+
+        XCTAssertGreaterThanOrEqual(hits.count, 2, "should surface both venison rows from the in-scope book")
+        XCTAssertTrue(hits.allSatisfy { $0.bookId == venisonBook.id }, "out-of-scope book must not leak in")
+        // The full chunk text must come back, not a truncated snippet — the
+        // LLM needs the actual recipe to format it.
+        XCTAssertTrue(hits.allSatisfy { $0.text.lowercased().contains("venison") })
+        XCTAssertTrue(hits.contains { $0.text.contains("juniper") })
+        XCTAssertTrue(hits.contains { $0.text.contains("red wine") })
+
+        // Empty scope short-circuits.
+        let nothing = await ftsManager.searchChunks(
+            query: "venison recipe",
+            scopedBookIds: [],
+            limit: 10
+        )
+        XCTAssertTrue(nothing.isEmpty, "empty scope must yield zero hits")
+    }
+
     // MARK: - Test 9: Scoped Search Doesn't Leak Other Books
 
     /// Cookbook mode must scope strictly to the selected collection. A second
