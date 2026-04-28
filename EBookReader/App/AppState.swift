@@ -625,6 +625,16 @@ final class AppState {
             }
         }
         isIndexing = false
+
+        // FTS only made the books findable by keyword in book-level search.
+        // For chat / cookbook mode we ALSO need embedding indexing to populate
+        // the textChunk table. Previously embedding ran only at app startup,
+        // so books imported afterwards were invisible to cookbook search
+        // until the next launch. Kick it off in the background — guarded
+        // internally against re-entry and missing model.
+        Task { [weak self] in
+            await self?.startEmbeddingIndexing()
+        }
     }
 
     // MARK: - Model Download & Embedding
@@ -903,9 +913,12 @@ final class AppState {
         if case .collection(collectionId) = sidebarSelection {
             await loadCollectionBooks(collectionId)
         }
-        // If this is a cookbook collection, kick off recipe detection for the new books
+        // If this is a cookbook collection, ensure its books are embedding-
+        // indexed (recipe detection needs chunks to exist), THEN run the
+        // detector. Without this, a fresh cookbook collection ends up
+        // searchable but with zero text chunks until the next app launch.
         if let collection = collections.first(where: { $0.id == collectionId }), collection.isCookbook {
-            scheduleRecipeDetection(forBookIds: bookIDs)
+            scheduleCookbookIndexing(forBookIds: bookIDs)
         }
     }
 
@@ -921,10 +934,11 @@ final class AppState {
         let willBeCookbook = !collection.isCookbook
         collection.collectionType = willBeCookbook ? "cookbook" : "default"
         try? await collectionRepository.updateCollection(collection)
-        // If newly marked as cookbook, run recipe detection on all its books
+        // If newly marked as cookbook, ensure all books in this collection
+        // are embedding-indexed before running recipe detection.
         if willBeCookbook {
             let bookIds = (try? await collectionRepository.fetchBookIDs(inCollection: collectionId)) ?? []
-            scheduleRecipeDetection(forBookIds: bookIds)
+            scheduleCookbookIndexing(forBookIds: bookIds)
         }
     }
 
@@ -945,6 +959,36 @@ final class AppState {
             }
             self.isRecipeDetecting = false
             self.logger.info("Recipe detection complete for \(bookIds.count) books")
+        }
+    }
+
+    /// Cookbook-onboarding pipeline: ensure every supplied book has been
+    /// embedding-indexed (chunks inserted into textChunk + embeddings
+    /// computed), THEN run recipe detection on the resulting chunks.
+    /// Without this, recipe detection runs against an empty textChunk row
+    /// set and the cookbook is silently empty until next launch.
+    private func scheduleCookbookIndexing(forBookIds bookIds: [UUID]) {
+        guard !bookIds.isEmpty else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            // 1. Find which books actually need embedding (skip already-indexed).
+            let allBooks = (try? await self.repository.fetchBooks(byIds: bookIds)) ?? []
+            let unembedded = allBooks.filter { !$0.embeddingIndexed }
+
+            if !unembedded.isEmpty {
+                self.logger.info("Cookbook onboarding: indexing \(unembedded.count) of \(bookIds.count) books")
+                self.isEmbeddingIndexing = true
+                var done = 0
+                for book in unembedded {
+                    await self.embeddingManager.indexBook(book)
+                    done += 1
+                    self.embeddingIndexingProgress = (done, unembedded.count)
+                }
+                self.isEmbeddingIndexing = false
+            }
+
+            // 2. Now that chunks exist, run recipe detection.
+            self.scheduleRecipeDetection(forBookIds: bookIds)
         }
     }
 

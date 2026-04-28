@@ -119,6 +119,15 @@ actor BookRepository {
         }
     }
 
+    /// Batched lookup by ID set. Used by cookbook lifecycle to ensure every
+    /// book in a collection has its embedding pipeline kicked off.
+    func fetchBooks(byIds ids: [UUID]) throws -> [Book] {
+        guard !ids.isEmpty else { return [] }
+        return try dbPool.read { db in
+            try Book.filter(ids.contains(Book.Columns.id)).fetchAll(db)
+        }
+    }
+
     func bookCount() throws -> Int {
         try dbPool.read { db in
             try Book.fetchCount(db)
