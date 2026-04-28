@@ -35,9 +35,10 @@ dmg: build
 	ln -s /Applications "$$TMP/Applications"; \
 	test -d "$$TMP/$(APP_NAME).app"; \
 	test -L "$$TMP/Applications"; \
-	hdiutil create -volname "$(VOLUME_NAME)" -srcfolder "$$TMP" -ov -format UDZO "$(DMG_NAME)"; \
+	hdiutil create -volname "$(VOLUME_NAME)" -srcfolder "$$TMP" -ov \
+		-fs HFS+ -format UDZO "$(DMG_NAME)"; \
 	hdiutil verify "$(DMG_NAME)"
-	@echo "\n✓ Created $(DMG_NAME) with $(APP_NAME).app and Applications link"
+	@echo "\n✓ Created $(DMG_NAME) with $(APP_NAME).app and Applications link (HFS+)"
 
 verify-dmg:
 	@echo "Mount the DMG and confirm it contains:"
