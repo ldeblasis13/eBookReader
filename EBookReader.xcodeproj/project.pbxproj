@@ -24,6 +24,7 @@
 		323D42BC252F2CA9ED8DED5C /* ChatSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBA5C5E676C1EC7FC586FA55 /* ChatSession.swift */; };
 		3755F7588904DA39358E97F9 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C811148A6C107EF81E094901 /* SidebarView.swift */; };
 		3E2CC85DFC14853F14564DFD /* RecipeDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C19C0E0CED69F73AF8ED5B2 /* RecipeDetector.swift */; };
+		RP1234567890ABCDEF111111 /* RecipeResponseParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = RP1234567890ABCDEF222222 /* RecipeResponseParser.swift */; };
 		3F45F8F9EDF73E6140D63CDF /* BookRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = C66CCFC3541A7692D2F2CC31 /* BookRepository.swift */; };
 		40E3DCECCD89022C3245ADD5 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60347F3075065D72684C6AA8 /* Theme.swift */; };
 		42C841381410E192F4929602 /* TableOfContentsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE63A71CF50B746CE29421E9 /* TableOfContentsView.swift */; };
@@ -132,6 +133,7 @@
 		99DAC9BDE712BF2A890CD101 /* FileWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileWatcher.swift; sourceTree = "<group>"; };
 		9AF546C1C5230B9144389B7F /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
 		9C19C0E0CED69F73AF8ED5B2 /* RecipeDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecipeDetector.swift; sourceTree = "<group>"; };
+		RP1234567890ABCDEF222222 /* RecipeResponseParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecipeResponseParser.swift; sourceTree = "<group>"; };
 		9F184D068E3B85EDA4BA7EB3 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A258D184EFC7293E59D6D545 /* MobiParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobiParser.swift; sourceTree = "<group>"; };
 		A2EF52A4C9C708304B9EA8EB /* SearchResultsSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchResultsSidebar.swift; sourceTree = "<group>"; };
@@ -236,6 +238,7 @@
 				117ACAC80BE47C2DA9FD8ACF /* ModelDownloadManager.swift */,
 				0000B390623AEF7F3A687171 /* PositionAwareTextExtractor.swift */,
 				9C19C0E0CED69F73AF8ED5B2 /* RecipeDetector.swift */,
+				RP1234567890ABCDEF222222 /* RecipeResponseParser.swift */,
 				83ED66FFCCB08DE481DF89CE /* TextExtractor.swift */,
 				66910D00A77C40401D43CBD2 /* ThumbnailGenerator.swift */,
 			);
@@ -583,6 +586,7 @@
 				B502046AF24D4305FB2A29F2 /* ReaderToolbar.swift in Sources */,
 				FA14A38C35B11D4441D1782A /* RecipeCardView.swift in Sources */,
 				3E2CC85DFC14853F14564DFD /* RecipeDetector.swift in Sources */,
+				RP1234567890ABCDEF111111 /* RecipeResponseParser.swift in Sources */,
 				51E0D68C5EFDB2673CE1E1BA /* SearchResultsSidebar.swift in Sources */,
 				547490929678B512E4FC882E /* SearchResultsView.swift in Sources */,
 				076D435BA94D54CC39DCE7DE /* SettingsView.swift in Sources */,
@@ -786,7 +790,7 @@
 				);
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Vendor/llama-prebuilt/lib";
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.1.4;
+				MARKETING_VERSION = 1.1.5;
 				OTHER_LDFLAGS = (
 					"-lllama",
 					"-lggml",
@@ -824,7 +828,7 @@
 				);
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Vendor/llama-prebuilt/lib";
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.1.4;
+				MARKETING_VERSION = 1.1.5;
 				OTHER_LDFLAGS = (
 					"-lllama",
 					"-lggml",

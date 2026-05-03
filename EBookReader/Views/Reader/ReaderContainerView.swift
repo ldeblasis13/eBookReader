@@ -111,6 +111,17 @@ struct BookReaderView: View {
         .task {
             await loadAnnotations()
         }
+        // Cookbook recipe-card "Open" sets a pending jump on AppState
+        // before the tab mounts. Once the underlying reader view is loaded
+        // (pdfDocument set, or webReaderContent set), wait a beat for its
+        // NotificationCenter observers to register, then fire the
+        // navigation notification.
+        .onChange(of: pdfDocument != nil) { _, isLoaded in
+            if isLoaded { consumePendingJumpAfterLoad() }
+        }
+        .onChange(of: webReaderContent != nil) { _, isLoaded in
+            if isLoaded { consumePendingJumpAfterLoad() }
+        }
         .sheet(isPresented: Binding(
             get: { annotationState.selectedAnnotationID != nil },
             set: { if !$0 { annotationState.selectedAnnotationID = nil } }
@@ -140,6 +151,35 @@ struct BookReaderView: View {
     private func loadAnnotations() async {
         let loaded = (try? await appState.annotationRepository.fetchAnnotations(forBook: book.id)) ?? []
         annotationState.annotations = loaded
+    }
+
+    /// Consume any pending recipe-card jump for this book and post the
+    /// matching navigation notification. The 350ms delay covers the gap
+    /// between content being set and the wrapper view's coordinator
+    /// finishing addObserver — without it, the post lands before anyone
+    /// is listening and the user stays on page 1.
+    private func consumePendingJumpAfterLoad() {
+        guard let position = appState.consumePendingJump(forBook: book.id) else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(350))
+            switch position {
+            case .pdf(let pageIndex):
+                NotificationCenter.default.post(
+                    name: .ebookReaderGoToPage,
+                    object: pageIndex
+                )
+            case .epub(let spineIndex, _):
+                NotificationCenter.default.post(
+                    name: .ebookReaderNavigateToSpineIndex,
+                    object: spineIndex
+                )
+            case .fb2, .mobi, .chm:
+                // Web-based readers don't expose a chunk-level anchor here;
+                // the reader will land on the document start. Future work:
+                // emit a scroll-to-text anchor for these formats.
+                break
+            }
+        }
     }
 
     private func navigateToAnnotation(_ annotation: Annotation) {

@@ -196,11 +196,18 @@ actor HybridSearchManager {
                 let ftsChunks = await ftsManager.searchChunks(
                     query: query,
                     scopedBookIds: scopedBookIds,
-                    limit: options.maxResults
+                    limit: options.maxResults * 2 // overfetch — we filter
                 )
-                if !ftsChunks.isEmpty {
-                    logger.info("FTS chunk fallback: \(ftsChunks.count) hits used (AI index empty)")
-                    return ftsChunks.compactMap { hit -> HybridSearchResult? in
+                // Apply the same recipe-quality filter we use for vector
+                // results, otherwise FTS hits on "chocolate" in a preface
+                // would surface as recipes.
+                let filteredFTS = ftsChunks.filter { hit in
+                    !RecipeDetector.isLikelyNonRecipePage(hit.text)
+                        && RecipeDetector.score(hit.text) >= 0.15
+                }
+                if !filteredFTS.isEmpty {
+                    logger.info("FTS chunk fallback: \(filteredFTS.count) of \(ftsChunks.count) hits passed recipe filter (AI index empty)")
+                    return filteredFTS.prefix(options.maxResults).compactMap { hit -> HybridSearchResult? in
                         guard let book = bookMap[hit.bookId] else { return nil }
                         return HybridSearchResult(
                             id: UUID(),
@@ -219,6 +226,8 @@ actor HybridSearchManager {
                             isRecipeHit: false
                         )
                     }
+                } else if !ftsChunks.isEmpty {
+                    logger.info("FTS chunk fallback: all \(ftsChunks.count) hits were front-matter / non-recipe; returning empty")
                 }
             }
 
@@ -250,9 +259,29 @@ actor HybridSearchManager {
         let ftsMin = ftsValues.min() ?? 0.0
         let ftsRange = max(ftsMax - ftsMin, 0.001)
 
-        // Build candidate list, score-blended, with recipe-hint boost
+        // Build candidate list, score-blended, with recipe-hint boost.
+        // Cookbook mode also runs each chunk through a recipe-quality
+        // filter — the keyword/vector path has no notion of "is this
+        // actually a recipe?" so a TOC line mentioning chocolate would
+        // otherwise come back as a recipe card.
         var candidates: [(chunkId: Int64, chunk: TextChunk, score: Double)] = []
+        var rejectedNonRecipe = 0
+        var rejectedFrontMatter = 0
         for (chunkId, info) in chunkScores {
+            // Recipe-hint chunks pass automatically — they're already
+            // confirmed by RecipeDetector at index time. Everything else
+            // must clear the live filter.
+            if !recipeHintIds.contains(chunkId) {
+                if RecipeDetector.isLikelyNonRecipePage(info.chunk.text) {
+                    rejectedFrontMatter += 1
+                    continue
+                }
+                let liveScore = RecipeDetector.score(info.chunk.text)
+                if liveScore < 0.15 {
+                    rejectedNonRecipe += 1
+                    continue
+                }
+            }
             let normalizedFTS = ((ftsRankByBook[info.bookId] ?? 0.0) - ftsMin) / ftsRange
             var blended = ftsWeight * normalizedFTS + (1 - ftsWeight) * Double(info.score)
             if recipeHintIds.contains(chunkId) {
@@ -261,6 +290,9 @@ actor HybridSearchManager {
             candidates.append((chunkId: chunkId, chunk: info.chunk, score: blended))
         }
         candidates.sort { $0.score > $1.score }
+        if rejectedNonRecipe > 0 || rejectedFrontMatter > 0 {
+            logger.info("Cookbook filter: rejected \(rejectedFrontMatter) front-matter chunks + \(rejectedNonRecipe) low-recipe-score chunks")
+        }
 
         // Take top N, expand each with adjacent chunks for full recipe context
         let top = Array(candidates.prefix(options.maxResults))

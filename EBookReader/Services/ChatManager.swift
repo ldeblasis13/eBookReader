@@ -206,10 +206,34 @@ actor ChatManager {
             }
         }
 
+        // Step 5: In cookbook mode, parse the model's structured response
+        // into ParsedRecipe records so the UI can render proper cards
+        // instead of a plaintext bubble. The system prompt forces the
+        // "Recipe N: / From: / Ingredients: / Instructions:" format that
+        // the parser keys on, and excerpt N → originating chunk gives us
+        // the position the Open button needs.
+        let parsedRecipes: [ChatMessage.ParsedRecipe]
+        if isCookbookMode {
+            let sources = topResults.enumerated().map { (i, result) in
+                RecipeResponseParser.ExcerptSource(
+                    excerptIndex: i + 1,
+                    bookId: result.bookId,
+                    bookTitle: result.title,
+                    author: result.author,
+                    position: result.position
+                )
+            }
+            parsedRecipes = RecipeResponseParser.parse(responseText, sources: sources)
+            logger.info("Cookbook response: \(parsedRecipes.count) recipe card(s) parsed from \(topResults.count) excerpt(s)")
+        } else {
+            parsedRecipes = []
+        }
+
         return ChatMessage(
             role: .assistant,
             content: responseText,
-            references: Array(references.prefix(isCookbookMode ? 10 : 5))
+            references: Array(references.prefix(isCookbookMode ? 10 : 5)),
+            recipes: parsedRecipes
         )
     }
 

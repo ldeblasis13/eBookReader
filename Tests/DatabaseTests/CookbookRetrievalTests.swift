@@ -701,6 +701,178 @@ final class CookbookRetrievalTests: XCTestCase {
         XCTAssertTrue(nothing.isEmpty, "empty scope must yield zero hits")
     }
 
+    // MARK: - Test 8c: Recipe-Quality Filter Rejects TOC / Index / Preface
+
+    /// Cookbook search must reject chunks that contain a keyword hit but
+    /// aren't actually recipes — TOC entries with dot leaders, index lines
+    /// with comma-separated page numbers, copyright pages, prefaces. This
+    /// is the failure mode where "chocolate" in the preface comes back as
+    /// a recipe.
+    func testRecipeQualityFilterRejectsFrontMatter() {
+        // 1. TOC: dot-leader page numbers
+        let toc = """
+        Table of Contents
+        Chapter 1: Stocks ...................... 12
+        Chapter 2: Soups ....................... 34
+        Chapter 3: Chocolate Desserts .......... 187
+        Chapter 4: Index ....................... 312
+        """
+        XCTAssertTrue(RecipeDetector.isLikelyNonRecipePage(toc), "TOC with dot leaders must be rejected")
+
+        // 2. Index: comma-separated page numbers
+        let index = """
+        Chocolate, dark, 47, 89, 102
+        Chocolate, milk, 50, 51
+        Cinnamon, ground, 12, 14, 88, 211
+        Cumin, 23, 45
+        Eggplant, 134, 156, 199
+        """
+        XCTAssertTrue(RecipeDetector.isLikelyNonRecipePage(index), "Index entries must be rejected")
+
+        // 3. Copyright / front matter
+        let copyright = """
+        Copyright © 2024 Some Author
+        All rights reserved. No part of this book may be reproduced or transmitted in any form or by any means.
+        """
+        XCTAssertTrue(RecipeDetector.isLikelyNonRecipePage(copyright))
+
+        // 4. A preface mentioning chocolate but with no recipe content
+        let preface = """
+        Preface
+        I have always loved chocolate. As a child I would melt squares of dark chocolate over the radiator
+        and eat them with apples. This book is my love letter to that childhood obsession.
+        """
+        XCTAssertTrue(RecipeDetector.isLikelyNonRecipePage(preface), "Preface must be rejected even when it mentions a recipe keyword")
+
+        // 5. A real recipe must NOT be rejected
+        let recipe = """
+        Dark Chocolate Mousse
+        Serves 4. Prep 15 minutes. Chill 2 hours.
+        Ingredients:
+        - 200g dark chocolate (70%)
+        - 4 large eggs, separated
+        - 50g caster sugar
+        - 200ml double cream
+        Instructions:
+        Melt the chocolate in a bowl set over simmering water. Whisk the egg yolks with the sugar until pale.
+        Whip the cream to soft peaks. Fold the chocolate into the yolks, then fold in the cream.
+        Beat the egg whites to stiff peaks and fold them in. Chill for 2 hours.
+        """
+        XCTAssertFalse(RecipeDetector.isLikelyNonRecipePage(recipe), "An actual recipe must NOT be rejected")
+        XCTAssertGreaterThanOrEqual(RecipeDetector.score(recipe), 0.3, "An actual recipe must score well above the 0.15 cookbook gate")
+
+        // 6. Score on the preface is below the cookbook gate even though it
+        // mentions chocolate — protects the keyword fallback path.
+        XCTAssertLessThan(RecipeDetector.score(preface), 0.15, "Preface chocolate-mention must score below the 0.15 cookbook gate")
+    }
+
+    // MARK: - Test 8d: Recipe Response Parser
+
+    /// The cookbook system prompt forces the LLM into a strict
+    /// "Recipe N: / From: / Ingredients: / Instructions:" format. The
+    /// parser turns that text into ParsedRecipe records carrying the
+    /// position from the originating chunk. Without this, the chat UI
+    /// can't render cards and the Open button can't navigate.
+    func testRecipeResponseParserRoundTrip() async throws {
+        let book = try await insertBook(title: "Wild Game Cookery", author: "M. Hank")
+        let chunkId = try await insertChunk(
+            bookId: book.id,
+            chunkIndex: 4,
+            text: "Roast venison loin with juniper crust...",
+            embedding: nil
+        )
+        XCTAssertGreaterThan(chunkId, 0)
+
+        let llmResponse = """
+        I found 2 recipes matching your query.
+
+        Recipe 1: Roast Venison Loin with Juniper Crust
+        From: Wild Game Cookery
+        Excerpt: [excerpt 1]
+        Ingredients (visible in excerpt):
+        - 1.5 kg venison loin
+        - 2 tbsp juniper berries, crushed
+        - 4 cloves garlic
+        - 100ml red wine
+        - sea salt
+        Instructions (visible in excerpt):
+        Preheat the oven to 200°C. Crush the juniper berries with the garlic and salt.
+        Rub the mixture into the venison loin. Sear on all sides in a hot pan, then transfer
+        to the oven and roast for 25 minutes for medium-rare. Rest for 10 minutes before slicing.
+        Notes: Best served with red cabbage and roast potatoes.
+        Completeness: complete recipe
+
+        Recipe 2: Venison Stew with Red Wine
+        From: Wild Game Cookery
+        Excerpt: [excerpt 1]
+        Ingredients:
+        - 1 kg venison shoulder, cubed
+        - 2 onions, chopped
+        - 500ml red wine
+        Instructions:
+        Brown the venison in batches. Sauté the onions, deglaze with wine, return the meat,
+        and braise for 3 hours.
+        Completeness: partial recipe — open the book for the full version
+        """
+
+        let sources = [
+            RecipeResponseParser.ExcerptSource(
+                excerptIndex: 1,
+                bookId: book.id,
+                bookTitle: "Wild Game Cookery",
+                author: "M. Hank",
+                position: .epub(spineIndex: 4, href: "ch5.xhtml")
+            )
+        ]
+        let recipes = RecipeResponseParser.parse(llmResponse, sources: sources)
+
+        XCTAssertEqual(recipes.count, 2, "should split into two recipe blocks")
+
+        // ── Recipe 1
+        let r1 = try XCTUnwrap(recipes.first)
+        XCTAssertEqual(r1.title, "Roast Venison Loin with Juniper Crust")
+        XCTAssertEqual(r1.bookId, book.id, "must carry source bookId for the Open button")
+        XCTAssertEqual(r1.bookTitle, "Wild Game Cookery")
+        XCTAssertEqual(r1.author, "M. Hank")
+        XCTAssertEqual(r1.ingredients.count, 5)
+        XCTAssertEqual(r1.ingredients.first, "1.5 kg venison loin", "bullet leader must be stripped")
+        XCTAssertTrue(r1.instructions.lowercased().contains("preheat"), "instructions paragraph preserved")
+        XCTAssertEqual(r1.notes, "Best served with red cabbage and roast potatoes.")
+        XCTAssertEqual(r1.completeness, "complete recipe")
+        // Position carried through so Open knows where to jump.
+        if case .epub(let spine, _) = r1.position {
+            XCTAssertEqual(spine, 4)
+        } else {
+            XCTFail("expected epub position from the source excerpt")
+        }
+
+        // ── Recipe 2 (partial)
+        let r2 = recipes[1]
+        XCTAssertEqual(r2.title, "Venison Stew with Red Wine")
+        XCTAssertEqual(r2.ingredients.count, 3)
+        XCTAssertNotNil(r2.completeness)
+        XCTAssertTrue(r2.completeness?.lowercased().contains("partial") == true)
+
+        // ── Negative case: response that doesn't follow the format yields zero
+        let freeForm = "I found a venison recipe but I forgot to format it. Here it is."
+        XCTAssertTrue(RecipeResponseParser.parse(freeForm, sources: sources).isEmpty)
+
+        // ── Negative case: response with no matching source excerpt yields zero
+        let noMatchingSource = """
+        Recipe 1: Mystery Dish
+        From: A Book Not In Sources
+        Excerpt: [excerpt 99]
+        Ingredients:
+        - 1 thing
+        Instructions:
+        Do stuff.
+        """
+        XCTAssertTrue(
+            RecipeResponseParser.parse(noMatchingSource, sources: sources).isEmpty,
+            "a recipe whose excerpt index doesn't match any source must be dropped — the Open button has nowhere to go"
+        )
+    }
+
     // MARK: - Test 9: Scoped Search Doesn't Leak Other Books
 
     /// Cookbook mode must scope strictly to the selected collection. A second

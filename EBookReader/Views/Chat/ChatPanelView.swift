@@ -19,9 +19,11 @@ struct ChatPanelView: View {
                             emptyState
                         }
                         ForEach(appState.chatSession.messages) { message in
-                            ChatMessageView(message: message) { ref in
-                                openBookReference(ref)
-                            }
+                            ChatMessageView(
+                                message: message,
+                                onOpenReference: openBookReference,
+                                onOpenRecipe: openRecipe
+                            )
                             .id(message.id)
                         }
 
@@ -160,8 +162,12 @@ struct ChatPanelView: View {
 
     private func openBookReference(_ ref: ChatMessage.BookReference) {
         guard let book = appState.books.first(where: { $0.id == ref.bookId }) else { return }
-        appState.openBook(book)
-        // TODO: Navigate to ref.position after book opens
+        appState.openBook(book, jumpingTo: ref.position)
+    }
+
+    private func openRecipe(_ recipe: ChatMessage.ParsedRecipe) {
+        guard let book = appState.books.first(where: { $0.id == recipe.bookId }) else { return }
+        appState.openBook(book, jumpingTo: recipe.position)
     }
 }
 
@@ -170,44 +176,65 @@ struct ChatPanelView: View {
 struct ChatMessageView: View {
     let message: ChatMessage
     let onOpenReference: (ChatMessage.BookReference) -> Void
+    let onOpenRecipe: (ChatMessage.ParsedRecipe) -> Void
 
     var body: some View {
-        VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 6) {
-            // Message bubble
-            Text(message.content)
-                .font(.body)
-                .textSelection(.enabled)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(bubbleBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+        VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 8) {
+            if !message.recipes.isEmpty {
+                // Cookbook response — render structured recipe cards in
+                // place of the plaintext bubble. The model's verbose prose
+                // ("Here are the recipes I found...") would otherwise duplicate
+                // every card, so we suppress it.
+                cookbookHeader
+                ForEach(message.recipes) { recipe in
+                    RecipeCardView(recipe: recipe) {
+                        onOpenRecipe(recipe)
+                    }
+                }
+            } else {
+                // Plaintext bubble for everything else (general chat,
+                // no-results messages, errors).
+                Text(message.content)
+                    .font(.body)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(bubbleBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
 
-            // Book references (assistant only)
-            if !message.references.isEmpty {
-                let hasRecipes = message.references.contains(where: \.isRecipe)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(hasRecipes ? "From Your Cookbooks" : "Sources")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .textCase(.uppercase)
-
-                    ForEach(message.references) { ref in
-                        if ref.isRecipe {
-                            RecipeCardView(reference: ref) {
-                                onOpenReference(ref)
-                            }
-                        } else {
+                // Source cards under the bubble for non-cookbook responses.
+                if !message.references.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Sources")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .textCase(.uppercase)
+                        ForEach(message.references) { ref in
                             BookReferenceCard(reference: ref) {
                                 onOpenReference(ref)
                             }
                         }
                     }
+                    .padding(.horizontal, 4)
                 }
-                .padding(.horizontal, 4)
             }
         }
         .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
         .padding(.horizontal, 16)
+    }
+
+    private var cookbookHeader: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "fork.knife")
+                .font(.caption)
+                .foregroundStyle(.orange)
+            Text("From your cookbooks (\(message.recipes.count))")
+                .font(.caption2)
+                .fontWeight(.semibold)
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+        }
+        .padding(.horizontal, 4)
     }
 
     private var bubbleBackground: some ShapeStyle {

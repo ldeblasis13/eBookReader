@@ -63,10 +63,70 @@ actor RecipeDetector {
         }
     }
 
-    // MARK: - Scoring
+    // MARK: - Public scoring (callable as a filter in cookbook search)
+
+    /// Public scoring API used by HybridSearchManager to gate cookbook
+    /// candidates. Returns 0-1; the search filter requires ≥ 0.15.
+    nonisolated static func score(_ text: String) -> Double {
+        Self.scoreRecipeLikelihoodImpl(text)
+    }
+
+    /// Heuristic: is this chunk almost certainly a TOC, index, copyright,
+    /// or front-matter page rather than an actual recipe? Used by the
+    /// cookbook search filter to reject "chocolate is mentioned in the
+    /// preface" matches even when the keyword search hits.
+    nonisolated static func isLikelyNonRecipePage(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let lines = text.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+        let nonEmptyLines = lines.filter { !$0.isEmpty }
+        guard !nonEmptyLines.isEmpty else { return true }
+
+        // Front-matter section titles dominate the first line.
+        let frontMatterMarkers = [
+            "table of contents", "contents", "index", "copyright",
+            "acknowledgments", "acknowledgements", "dedication",
+            "about the author", "foreword", "preface", "introduction",
+            "bibliography", "glossary", "credits"
+        ]
+        if let firstLine = nonEmptyLines.first?.lowercased(),
+           firstLine.count < 60,
+           frontMatterMarkers.contains(where: { firstLine.contains($0) }) {
+            return true
+        }
+
+        // Index page heuristic: lots of "Word, page-number" lines.
+        // e.g. "Chocolate, dark, 47, 89, 102"
+        let indexLikePattern = #"^[A-Za-z][A-Za-z\s,\-']{2,40},\s*\d{1,4}(\s*,\s*\d{1,4})*\s*$"#
+        if let regex = try? NSRegularExpression(pattern: indexLikePattern, options: .anchorsMatchLines) {
+            let matches = regex.numberOfMatches(in: text, range: NSRange(text.startIndex..., in: text))
+            // ≥ 4 index-style lines in one chunk is overwhelmingly an index.
+            if matches >= 4 { return true }
+        }
+
+        // TOC heuristic: many lines containing "...." dot-leader page
+        // numbers, e.g. "Chapter 3 .................. 47".
+        let dotLeaderLines = nonEmptyLines.filter { $0.contains("....") || $0.contains(". . .") }
+        if dotLeaderLines.count >= 3 { return true }
+
+        // Pure number-spam (page numbers in indexes can produce these).
+        let digitFraction: Double = {
+            let digits = text.filter(\.isNumber).count
+            return text.isEmpty ? 0 : Double(digits) / Double(text.count)
+        }()
+        if digitFraction > 0.2 && lower.contains("see also") { return true }
+
+        return false
+    }
 
     /// Scores a text chunk from 0 (not a recipe) to 1 (definitely a recipe).
     private func scoreRecipeLikelihood(_ text: String) -> Double {
+        Self.scoreRecipeLikelihoodImpl(text)
+    }
+
+    /// The actual scoring implementation — pure function so it can be
+    /// called both from the actor (during indexing) and from the
+    /// HybridSearchManager filter (without crossing the actor boundary).
+    nonisolated private static func scoreRecipeLikelihoodImpl(_ text: String) -> Double {
         let lower = text.lowercased()
         var score = 0.0
 

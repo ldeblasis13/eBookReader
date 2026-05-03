@@ -733,16 +733,39 @@ final class AppState {
 
     // MARK: - Tab Management
 
+    /// Bookmarks set by recipe-card "Open" actions. The reader picks one up
+    /// when it finishes loading the book and clears it. Keyed by book id so
+    /// it survives across tab switches.
+    private(set) var pendingJumpTargets: [UUID: ContentPosition] = [:]
+
     func openBook(_ book: Book) {
+        openBook(book, jumpingTo: nil)
+    }
+
+    /// Opens a book (or activates its existing tab) and optionally schedules
+    /// a jump to a specific position. Used by cookbook recipe cards so
+    /// "Open" lands the user on the actual recipe page instead of the cover.
+    func openBook(_ book: Book, jumpingTo position: ContentPosition?) {
         // Don't open books whose files are missing.
         guard book.isAvailable || ensureFileAccess(for: book) else {
             logger.warning("Cannot open book — file not found: \(book.filePath)")
             return
         }
 
-        // If the book is already open, just activate its tab
+        // Always record the pending jump (cleared by the reader once
+        // navigation completes). This is what catches the cold-open case
+        // where the reader hasn't subscribed to NotificationCenter yet.
+        if let position { pendingJumpTargets[book.id] = position }
+
+        // If the book is already open, just activate its tab AND fire the
+        // navigation notification immediately — the reader is already
+        // listening, so the post lands without needing the pending-jump
+        // fallback.
         if let existing = openTabs.first(where: { $0.bookID == book.id }) {
             activeTabID = existing.id
+            if let position {
+                postNavigation(for: position)
+            }
             return
         }
 
@@ -756,6 +779,38 @@ final class AppState {
         }
 
         persistTabs()
+    }
+
+    /// The reader calls this once it has finished loading and is ready to
+    /// accept navigation. Returns the queued position (if any) and clears
+    /// it so a second tab activation doesn't re-jump.
+    func consumePendingJump(forBook bookId: UUID) -> ContentPosition? {
+        guard let pos = pendingJumpTargets.removeValue(forKey: bookId) else { return nil }
+        return pos
+    }
+
+    /// Posts the format-appropriate navigation notification. Reader views
+    /// (PDF, EPUB, FB2, web-based) already observe these for in-book
+    /// search and TOC clicks — recipe cards just reuse the channel.
+    private func postNavigation(for position: ContentPosition) {
+        switch position {
+        case .pdf(let pageIndex):
+            NotificationCenter.default.post(
+                name: .ebookReaderGoToPage,
+                object: pageIndex
+            )
+        case .epub(let spineIndex, _):
+            NotificationCenter.default.post(
+                name: .ebookReaderNavigateToSpineIndex,
+                object: spineIndex
+            )
+        case .fb2, .mobi, .chm:
+            // Web-based readers don't expose a direct chunk anchor; the
+            // reader will show the start of the document and the user
+            // can use Find for the recipe title. Future work: wire an
+            // anchor jump for these formats too.
+            break
+        }
     }
 
     /// Removes a book from the library database. Does NOT delete the file on disk.
