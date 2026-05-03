@@ -45,19 +45,48 @@ struct BookListRow: View {
             }
         }
         .padding(.vertical, 4)
+        // Same multi-selection-aware drag as BookGridItem so list-mode
+        // users can drop books on a sidebar collection too.
+        .draggable(BookDragPayload.encode(book: book.id, selection: appState.selectedBookIDs))
         .contextMenu {
+            // Mirror BookGridItem: when this row is part of an existing
+            // multi-selection, the menu acts on the whole selection.
+            let targetIds: [UUID] = {
+                if appState.selectedBookIDs.contains(book.id) && appState.selectedBookIDs.count > 1 {
+                    return Array(appState.selectedBookIDs)
+                }
+                return [book.id]
+            }()
+            let isMulti = targetIds.count > 1
+
             if case .collection(let collectionId) = appState.sidebarSelection {
-                Button("Remove from Collection", role: .destructive) {
-                    Task { await appState.removeBookFromCollection(bookId: book.id, collectionId: collectionId) }
+                Button(isMulti
+                    ? "Remove \(targetIds.count) Books from Collection"
+                    : "Remove from Collection",
+                       role: .destructive
+                ) {
+                    Task {
+                        for id in targetIds {
+                            await appState.removeBookFromCollection(bookId: id, collectionId: collectionId)
+                        }
+                    }
                 }
                 Divider()
             }
 
             if !appState.collections.isEmpty {
-                Menu("Add to Collection") {
+                Menu(isMulti
+                    ? "Add \(targetIds.count) Books to Collection"
+                    : "Add to Collection"
+                ) {
                     ForEach(appState.collections) { collection in
                         Button(collection.name) {
-                            Task { await appState.addBooksToCollection(bookIDs: [book.id], collectionId: collection.id) }
+                            Task {
+                                await appState.addBooksToCollection(
+                                    bookIDs: targetIds,
+                                    collectionId: collection.id
+                                )
+                            }
                         }
                     }
                 }
@@ -65,8 +94,18 @@ struct BookListRow: View {
 
             Divider()
 
-            Button("Delete from Library", role: .destructive) {
-                Task { await appState.deleteBook(book) }
+            Button(isMulti
+                ? "Delete \(targetIds.count) Books from Library"
+                : "Delete from Library",
+                   role: .destructive
+            ) {
+                Task {
+                    if isMulti {
+                        await appState.deleteBooks(Set(targetIds))
+                    } else {
+                        await appState.deleteBook(book)
+                    }
+                }
             }
         }
     }

@@ -175,11 +175,15 @@ struct LibraryView: View {
     // MARK: - List View
 
     private var listView: some View {
-        Table(filteredBooks, selection: Binding(
+        // Switched to the explicit `rows:` builder so each TableRow can
+        // carry its own .draggable. The plain `Table(data:selection:)`
+        // initializer doesn't expose per-row drag, so list-view users
+        // had no way to drag books into a sidebar collection at all.
+        Table(of: Book.self, selection: Binding(
             get: { appState.selectedBookIDs },
             set: { appState.selectedBookIDs = $0 }
         )) {
-            TableColumn("Title") { book in
+            TableColumn("Title") { (book: Book) in
                 HStack(spacing: 4) {
                     Text(book.displayTitle)
                     if !book.isAvailable {
@@ -191,26 +195,34 @@ struct LibraryView: View {
             }
             .width(min: 150, ideal: 250)
 
-            TableColumn("Author") { book in
+            TableColumn("Author") { (book: Book) in
                 Text(book.author ?? "Unknown")
                     .foregroundStyle(.secondary)
             }
             .width(min: 100, ideal: 150)
 
-            TableColumn("Format") { book in
+            TableColumn("Format") { (book: Book) in
                 Text(book.format.displayName)
             }
             .width(60)
 
-            TableColumn("Size") { book in
+            TableColumn("Size") { (book: Book) in
                 Text(ByteCountFormatter.string(fromByteCount: book.fileSize, countStyle: .file))
             }
             .width(80)
 
-            TableColumn("Date Added") { book in
+            TableColumn("Date Added") { (book: Book) in
                 Text(book.dateAdded, style: .date)
             }
             .width(100)
+        } rows: {
+            ForEach(filteredBooks) { book in
+                TableRow(book)
+                    // Same payload encoder as BookGridItem / BookListRow.
+                    // When the dragged row is part of a multi-selection,
+                    // the whole selection rides along to the drop target.
+                    .draggable(BookDragPayload.encode(book: book.id, selection: appState.selectedBookIDs))
+            }
         }
         .contextMenu(forSelectionType: UUID.self) { selectedIDs in
             let selectedBooks = filteredBooks.filter { selectedIDs.contains($0.id) }
@@ -227,7 +239,10 @@ struct LibraryView: View {
                 }
 
                 if !appState.collections.isEmpty {
-                    Menu("Add to Collection") {
+                    Menu(selectedBooks.count == 1
+                        ? "Add to Collection"
+                        : "Add \(selectedBooks.count) Books to Collection"
+                    ) {
                         ForEach(appState.collections) { collection in
                             Button(collection.name) {
                                 Task {

@@ -177,7 +177,9 @@ struct CollectionSidebarItem: View {
             }
         }
         .dropDestination(for: String.self) { items, _ in
-            let bookIDs = items.compactMap { UUID(uuidString: $0) }
+            // BookDragPayload handles both formats: plain UUIDs (legacy /
+            // single-book drag) and "BOOKS:<csv>" (multi-selection drag).
+            let bookIDs = BookDragPayload.decode(items: items)
             guard !bookIDs.isEmpty else { return false }
             Task { await appState.addBooksToCollection(bookIDs: bookIDs, collectionId: collection.id) }
             return true

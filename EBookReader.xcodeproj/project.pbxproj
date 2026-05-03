@@ -20,6 +20,7 @@
 		1EB6C5FD2151602E1B601161 /* WatchedFolder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F1653F28C11ED26BDEB981E /* WatchedFolder.swift */; };
 		203A4B8E1442B117AD5829A7 /* BookRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 729DB4718C7566435F9002E8 /* BookRepositoryTests.swift */; };
 		CB1234567890ABCDEF123451 /* CookbookRetrievalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB1234567890ABCDEF123452 /* CookbookRetrievalTests.swift */; };
+		BD1234567890ABCDEF333333 /* BookDragPayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD1234567890ABCDEF444444 /* BookDragPayloadTests.swift */; };
 		2F8A01093FE02D37D4FDE175 /* Annotation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29583FDDA1EDC8E19D150614 /* Annotation.swift */; };
 		323D42BC252F2CA9ED8DED5C /* ChatSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBA5C5E676C1EC7FC586FA55 /* ChatSession.swift */; };
 		3755F7588904DA39358E97F9 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C811148A6C107EF81E094901 /* SidebarView.swift */; };
@@ -45,6 +46,7 @@
 		8D57A233849D834B386622A5 /* FolderScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21DFB03AB79B106D930CCB90 /* FolderScanner.swift */; };
 		A268087441EFB7000633737B /* MobiParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = A258D184EFC7293E59D6D545 /* MobiParser.swift */; };
 		A59E01DF6341CDC80A40B7EA /* BookGridItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = E32BA55138193444AEE7B605 /* BookGridItem.swift */; };
+		BD1234567890ABCDEF111111 /* BookDragPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD1234567890ABCDEF222222 /* BookDragPayload.swift */; };
 		A874FAF1479936E5086840A9 /* Book.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20E2620FE3216758FB3599E5 /* Book.swift */; };
 		AC0C491914921D98256457A3 /* DatabaseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67CC277136266CA1084279D6 /* DatabaseManager.swift */; };
 		AF6D3930D96AAC0964251EBA /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 0206FE2CFA995D9C1A23974B /* GRDB */; };
@@ -119,6 +121,7 @@
 		72658F18F895715B6AC4BC87 /* AnnotationListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnnotationListView.swift; sourceTree = "<group>"; };
 		729DB4718C7566435F9002E8 /* BookRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookRepositoryTests.swift; sourceTree = "<group>"; };
 		CB1234567890ABCDEF123452 /* CookbookRetrievalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CookbookRetrievalTests.swift; sourceTree = "<group>"; };
+		BD1234567890ABCDEF444444 /* BookDragPayloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookDragPayloadTests.swift; sourceTree = "<group>"; };
 		742D5C2FE8274AD77221C123 /* ContentPosition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentPosition.swift; sourceTree = "<group>"; };
 		75358525F072FC634BCC23C0 /* CollectionRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollectionRepository.swift; sourceTree = "<group>"; };
 		7FDC1E260CB3465DB584C208 /* EBookReaderTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EBookReaderTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -152,6 +155,7 @@
 		D96E070BEBBFC73389EAA43F /* ReaderToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderToolbar.swift; sourceTree = "<group>"; };
 		DE63A71CF50B746CE29421E9 /* TableOfContentsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TableOfContentsView.swift; sourceTree = "<group>"; };
 		E32BA55138193444AEE7B605 /* BookGridItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookGridItem.swift; sourceTree = "<group>"; };
+		BD1234567890ABCDEF222222 /* BookDragPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookDragPayload.swift; sourceTree = "<group>"; };
 		EB5465A93D7ABDC3BCB65C09 /* AnnotationRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnnotationRepository.swift; sourceTree = "<group>"; };
 		EBA5C5E676C1EC7FC586FA55 /* ChatSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatSession.swift; sourceTree = "<group>"; };
 		EC0744C2FC424B5DEBA9E4E1 /* ReaderContainerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderContainerView.swift; sourceTree = "<group>"; };
@@ -306,6 +310,7 @@
 			children = (
 				729DB4718C7566435F9002E8 /* BookRepositoryTests.swift */,
 				CB1234567890ABCDEF123452 /* CookbookRetrievalTests.swift */,
+				BD1234567890ABCDEF444444 /* BookDragPayloadTests.swift */,
 			);
 			path = DatabaseTests;
 			sourceTree = "<group>";
@@ -399,6 +404,7 @@
 			isa = PBXGroup;
 			children = (
 				E32BA55138193444AEE7B605 /* BookGridItem.swift */,
+				BD1234567890ABCDEF222222 /* BookDragPayload.swift */,
 				2C176C72FA39962C1EEFE9AA /* BookListRow.swift */,
 				9AF546C1C5230B9144389B7F /* LibraryView.swift */,
 			);
@@ -530,6 +536,7 @@
 			files = (
 				203A4B8E1442B117AD5829A7 /* BookRepositoryTests.swift in Sources */,
 				CB1234567890ABCDEF123451 /* CookbookRetrievalTests.swift in Sources */,
+				BD1234567890ABCDEF333333 /* BookDragPayloadTests.swift in Sources */,
 				48852DA90045B2C1A9F99F8C /* LargeLibraryPerformanceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -547,6 +554,7 @@
 				A874FAF1479936E5086840A9 /* Book.swift in Sources */,
 				FD153A230C2D31C2ED304C70 /* BookFormat.swift in Sources */,
 				A59E01DF6341CDC80A40B7EA /* BookGridItem.swift in Sources */,
+				BD1234567890ABCDEF111111 /* BookDragPayload.swift in Sources */,
 				DCF56CE47288B244348F62DB /* BookListRow.swift in Sources */,
 				3F45F8F9EDF73E6140D63CDF /* BookRepository.swift in Sources */,
 				DD5ED22ABA3C23B6A39FAF2D /* CHMParser.swift in Sources */,
@@ -790,7 +798,7 @@
 				);
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Vendor/llama-prebuilt/lib";
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.1.5;
+				MARKETING_VERSION = 1.1.6;
 				OTHER_LDFLAGS = (
 					"-lllama",
 					"-lggml",
@@ -828,7 +836,7 @@
 				);
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Vendor/llama-prebuilt/lib";
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.1.5;
+				MARKETING_VERSION = 1.1.6;
 				OTHER_LDFLAGS = (
 					"-lllama",
 					"-lggml",

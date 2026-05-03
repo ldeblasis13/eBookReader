@@ -70,29 +70,76 @@ struct BookGridItem: View {
                 isHovered = hovering
             }
         }
-        .draggable(book.id.uuidString)
-        .onTapGesture(count: 2) {
+        // Drag carries the multi-selection if this book is part of one,
+        // otherwise just this book. The autoclosure re-evaluates at drag
+        // start so a selection change between mount and drag is honored.
+        .draggable(BookDragPayload.encode(book: book.id, selection: appState.selectedBookIDs))
+        // Modifier-aware taps. Most-specific gestures must come first or
+        // the plain TapGesture swallows them.
+        .gesture(TapGesture(count: 2).onEnded {
             appState.openBook(book)
-        }
-        .onTapGesture(count: 1) {
+        })
+        .gesture(TapGesture(count: 1).modifiers(.command).onEnded {
+            // Cmd-click toggles this book in/out of the selection.
+            if appState.selectedBookIDs.contains(book.id) {
+                appState.selectedBookIDs.remove(book.id)
+            } else {
+                appState.selectedBookIDs.insert(book.id)
+            }
+        })
+        .gesture(TapGesture(count: 1).modifiers(.shift).onEnded {
+            // Shift-click extends the selection. We don't know the visible
+            // ordering from this view, so fall back to additive behavior;
+            // LibraryView could host a true range-select in the future.
+            appState.selectedBookIDs.insert(book.id)
+        })
+        .gesture(TapGesture(count: 1).onEnded {
             appState.selectedBookIDs = [book.id]
-        }
+        })
         .task {
             thumbnailImage = await appState.loadThumbnail(for: book)
         }
         .contextMenu {
+            // If the right-clicked book is part of an existing multi-
+            // selection, the menu acts on the whole selection. Otherwise
+            // it's a single-book menu (and the unrelated selection is
+            // ignored — matches Finder behavior).
+            let targetIds: [UUID] = {
+                if appState.selectedBookIDs.contains(book.id) && appState.selectedBookIDs.count > 1 {
+                    return Array(appState.selectedBookIDs)
+                }
+                return [book.id]
+            }()
+            let isMulti = targetIds.count > 1
+
             if case .collection(let collectionId) = appState.sidebarSelection {
-                Button("Remove from Collection", role: .destructive) {
-                    Task { await appState.removeBookFromCollection(bookId: book.id, collectionId: collectionId) }
+                Button(isMulti
+                    ? "Remove \(targetIds.count) Books from Collection"
+                    : "Remove from Collection",
+                       role: .destructive
+                ) {
+                    Task {
+                        for id in targetIds {
+                            await appState.removeBookFromCollection(bookId: id, collectionId: collectionId)
+                        }
+                    }
                 }
                 Divider()
             }
 
             if !appState.collections.isEmpty {
-                Menu("Add to Collection") {
+                Menu(isMulti
+                    ? "Add \(targetIds.count) Books to Collection"
+                    : "Add to Collection"
+                ) {
                     ForEach(appState.collections) { collection in
                         Button(collection.name) {
-                            Task { await appState.addBooksToCollection(bookIDs: [book.id], collectionId: collection.id) }
+                            Task {
+                                await appState.addBooksToCollection(
+                                    bookIDs: targetIds,
+                                    collectionId: collection.id
+                                )
+                            }
                         }
                     }
                 }
@@ -100,8 +147,18 @@ struct BookGridItem: View {
 
             Divider()
 
-            Button("Delete from Library", role: .destructive) {
-                Task { await appState.deleteBook(book) }
+            Button(isMulti
+                ? "Delete \(targetIds.count) Books from Library"
+                : "Delete from Library",
+                   role: .destructive
+            ) {
+                Task {
+                    if isMulti {
+                        await appState.deleteBooks(Set(targetIds))
+                    } else {
+                        await appState.deleteBook(book)
+                    }
+                }
             }
         }
     }
