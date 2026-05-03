@@ -1,8 +1,43 @@
 import SwiftUI
+import AppKit
 import UniformTypeIdentifiers
+
+// MARK: - App Delegate
+
+/// Intercepts the quit event so LLM / Metal resources can be freed before
+/// exit() runs.
+///
+/// The naive approach — listening to `willTerminateNotification` and
+/// scheduling `Task { await llmEngine.shutdown() }` — is fire-and-forget:
+/// AppKit does not wait for the Task, exit() runs immediately, C++ static
+/// destructors tear down ggml Metal globals while resource sets are still
+/// alive, and ggml_abort fires.
+///
+/// The correct fix is `applicationShouldTerminate` returning `.terminateLater`,
+/// which suspends AppKit's quit path until we call
+/// `NSApp.reply(toApplicationShouldTerminate: true)` — which AppState does at
+/// the very end of `shutdownForTermination()`, after llama_backend_free().
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Injected by EBookReaderApp once appState is created.
+    weak var appState: AppState?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let appState else { return .terminateNow }
+        // Kick off the async shutdown; NSApp.reply is called inside
+        // AppState.shutdownForTermination() once Metal resources are freed.
+        Task {
+            await appState.shutdownForTermination()
+        }
+        return .terminateLater
+    }
+}
+
+// MARK: - App Entry Point
 
 @main
 struct EBookReaderApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var appState = AppState()
     @Environment(\.openWindow) private var openWindow
 
@@ -11,13 +46,9 @@ struct EBookReaderApp: App {
             ContentView()
                 .environment(appState)
                 .task {
+                    // Wire the delegate before any background work starts.
+                    appDelegate.appState = appState
                     await appState.start()
-                }
-                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-                    appState.shutdownLLM()
-                    appState.prepareForTermination()
-                    appState.persistSettings()
-                    appState.stopAccessingFolders()
                 }
         }
         .commands {

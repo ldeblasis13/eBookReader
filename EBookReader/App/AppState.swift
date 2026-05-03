@@ -148,6 +148,11 @@ final class AppState {
     private var accessedFolderURLs: Set<URL> = []
     private var isShuttingDown = false
 
+    // Background task handles — kept so we can cancel them before LLM shutdown.
+    private var backgroundStartupTask: Task<Void, Never>?
+    private var preloadTask: Task<Void, Never>?
+    private var embeddingTask: Task<Void, Never>?
+
     init() {
         // Lightweight init: only restore UserDefaults. No file I/O, no DB access.
         if let modeString = UserDefaults.standard.string(forKey: "libraryViewMode"),
@@ -214,11 +219,12 @@ final class AppState {
         await restoreTabs()
         await startBackgroundIndexing()
 
-        // Model download + embedding indexing + preload LLM (non-blocking)
-        Task {
+        // Model download + embedding indexing + preload LLM (non-blocking).
+        // Track the handle so we can cancel before LLM shutdown on quit.
+        backgroundStartupTask = Task {
             await checkAndDownloadModels()
-            // Preload generation model in background so chat is instant when opened
-            Task.detached(priority: .background) { [weak self] in
+            // Preload generation model in background so chat is instant when opened.
+            preloadTask = Task.detached(priority: .background) { [weak self] in
                 guard let self else { return }
                 try? await self.llmEngine.preloadGenerationModel()
             }
@@ -632,7 +638,7 @@ final class AppState {
         // so books imported afterwards were invisible to cookbook search
         // until the next launch. Kick it off in the background — guarded
         // internally against re-entry and missing model.
-        Task { [weak self] in
+        embeddingTask = Task { [weak self] in
             await self?.startEmbeddingIndexing()
         }
     }
@@ -1253,10 +1259,36 @@ final class AppState {
         restartBookObservation()
     }
 
-    /// Cleanly shuts down LLM resources before app exit to prevent Metal crash.
-    func shutdownLLM() {
-        Task {
-            await llmEngine?.shutdown()
-        }
+    /// Gracefully shuts down the app in response to CMD-Q / Quit.
+    ///
+    /// Called by `AppDelegate.applicationShouldTerminate` which returns
+    /// `.terminateLater` so AppKit blocks exit() until we reply.
+    /// The critical path: cancel in-flight Tasks → await LLMEngine.shutdown()
+    /// (which calls llama_backend_free and frees Metal resource sets) → reply.
+    ///
+    /// Without this, ggml's Metal resource sets are still alive when C++ static
+    /// destructors run during exit(), causing `ggml_abort`.
+    func shutdownForTermination() async {
+        // 1. Persist state and cancel DB observations synchronously.
+        persistSettings()
+        stopAccessingFolders()
+        prepareForTermination()
+
+        // 2. Cancel all in-flight background tasks so they don't queue new
+        //    llama.cpp work after we free the engine below.
+        backgroundStartupTask?.cancel()
+        preloadTask?.cancel()
+        embeddingTask?.cancel()
+        backgroundStartupTask = nil
+        preloadTask = nil
+        embeddingTask = nil
+
+        // 3. Await full LLM / Metal shutdown.
+        //    LLMEngine is an actor — this serializes after any currently
+        //    executing inference finishes, then frees models + llama_backend.
+        await llmEngine?.shutdown()
+
+        // 4. Allow AppKit to proceed with exit().
+        NSApp.reply(toApplicationShouldTerminate: true)
     }
 }
