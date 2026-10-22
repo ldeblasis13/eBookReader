@@ -54,6 +54,22 @@ struct ContentView: View {
                     .background(.background)
             }
         }
+        .confirmationDialog(
+            appState.pendingDeletion?.title ?? "",
+            isPresented: Binding(
+                get: { appState.pendingDeletion != nil },
+                set: { if !$0 { appState.pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: appState.pendingDeletion
+        ) { request in
+            Button(request.confirmTitle, role: .destructive) {
+                Task { await appState.performDeletion(request) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { request in
+            Text(request.message)
+        }
     }
 
     // MARK: - Tab Bar

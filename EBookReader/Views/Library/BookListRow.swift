@@ -38,7 +38,7 @@ struct BookListRow: View {
                 .foregroundStyle(.secondary)
 
             // Availability indicator
-            if !book.isAvailable {
+            if !appState.isAvailable(book) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.yellow)
                     .font(.caption)
@@ -95,17 +95,11 @@ struct BookListRow: View {
             Divider()
 
             Button(isMulti
-                ? "Delete \(targetIds.count) Books from Library"
-                : "Delete from Library",
+                ? "Delete \(targetIds.count) Books from Library…"
+                : "Delete from Library…",
                    role: .destructive
             ) {
-                Task {
-                    if isMulti {
-                        await appState.deleteBooks(Set(targetIds))
-                    } else {
-                        await appState.deleteBook(book)
-                    }
-                }
+                Task { await appState.requestDeleteBooks(Set(targetIds)) }
             }
         }
     }

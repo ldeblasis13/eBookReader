@@ -186,7 +186,7 @@ struct LibraryView: View {
             TableColumn("Title") { (book: Book) in
                 HStack(spacing: 4) {
                     Text(book.displayTitle)
-                    if !book.isAvailable {
+                    if !appState.isAvailable(book) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.yellow)
                             .font(.caption2)
@@ -259,11 +259,11 @@ struct LibraryView: View {
                 Divider()
 
                 Button(selectedBooks.count == 1
-                    ? "Delete from Library"
-                    : "Delete \(selectedBooks.count) Books from Library",
+                    ? "Delete from Library…"
+                    : "Delete \(selectedBooks.count) Books from Library…",
                        role: .destructive
                 ) {
-                    Task { await appState.deleteBooks(Set(selectedBooks.map(\.id))) }
+                    Task { await appState.requestDeleteBooks(Set(selectedBooks.map(\.id))) }
                 }
             }
         } primaryAction: { selectedIDs in

@@ -48,6 +48,38 @@ actor AnnotationRepository {
         }
     }
 
+    /// Total annotations on the given books — shown before deleting them.
+    func annotationCount(forBooks bookIds: [UUID]) throws -> Int {
+        try dbPool.read { db in
+            var total = 0
+            // Chunked to stay well under SQLite's bound-parameter limit.
+            for start in stride(from: 0, to: bookIds.count, by: 500) {
+                let chunk = bookIds[start..<min(start + 500, bookIds.count)]
+                total += try Annotation
+                    .filter(chunk.contains(Annotation.Columns.bookId))
+                    .fetchCount(db)
+            }
+            return total
+        }
+    }
+
+    /// Total annotations on the books `BookRepository.deleteBooksInFolder`
+    /// would delete (same path match) — shown before removing a folder.
+    func annotationCount(inFolder folderPath: String) throws -> Int {
+        let normalized = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"
+        return try dbPool.read { db in
+            try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*) FROM annotation
+                    JOIN book ON book.id = annotation.bookId
+                    WHERE book.filePath LIKE ?
+                    """,
+                arguments: ["\(normalized)%"]
+            ) ?? 0
+        }
+    }
+
     // MARK: - Insert
 
     @discardableResult
