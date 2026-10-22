@@ -22,6 +22,7 @@
 		CB1234567890ABCDEF123451 /* CookbookRetrievalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB1234567890ABCDEF123452 /* CookbookRetrievalTests.swift */; };
 		BD1234567890ABCDEF333333 /* BookDragPayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD1234567890ABCDEF444444 /* BookDragPayloadTests.swift */; };
 		5E1A7B0C2D3E4F5061728393 /* BookRelocationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E1A7B0C2D3E4F5061728394 /* BookRelocationTests.swift */; };
+		C4A7B19E2D5F4C0A9E61B3D1 /* ChatPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4A7B19E2D5F4C0A9E61B3D2 /* ChatPipelineTests.swift */; };
 		2F8A01093FE02D37D4FDE175 /* Annotation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29583FDDA1EDC8E19D150614 /* Annotation.swift */; };
 		323D42BC252F2CA9ED8DED5C /* ChatSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBA5C5E676C1EC7FC586FA55 /* ChatSession.swift */; };
 		3755F7588904DA39358E97F9 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C811148A6C107EF81E094901 /* SidebarView.swift */; };
@@ -127,6 +128,7 @@
 		CB1234567890ABCDEF123452 /* CookbookRetrievalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CookbookRetrievalTests.swift; sourceTree = "<group>"; };
 		BD1234567890ABCDEF444444 /* BookDragPayloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookDragPayloadTests.swift; sourceTree = "<group>"; };
 		5E1A7B0C2D3E4F5061728394 /* BookRelocationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookRelocationTests.swift; sourceTree = "<group>"; };
+		C4A7B19E2D5F4C0A9E61B3D2 /* ChatPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatPipelineTests.swift; sourceTree = "<group>"; };
 		742D5C2FE8274AD77221C123 /* ContentPosition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentPosition.swift; sourceTree = "<group>"; };
 		75358525F072FC634BCC23C0 /* CollectionRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollectionRepository.swift; sourceTree = "<group>"; };
 		7FDC1E260CB3465DB584C208 /* EBookReaderTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EBookReaderTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -331,6 +333,7 @@
 				CB1234567890ABCDEF123452 /* CookbookRetrievalTests.swift */,
 				BD1234567890ABCDEF444444 /* BookDragPayloadTests.swift */,
 				5E1A7B0C2D3E4F5061728394 /* BookRelocationTests.swift */,
+				C4A7B19E2D5F4C0A9E61B3D2 /* ChatPipelineTests.swift */,
 			);
 			path = DatabaseTests;
 			sourceTree = "<group>";
@@ -558,6 +561,7 @@
 				CB1234567890ABCDEF123451 /* CookbookRetrievalTests.swift in Sources */,
 				BD1234567890ABCDEF333333 /* BookDragPayloadTests.swift in Sources */,
 				5E1A7B0C2D3E4F5061728393 /* BookRelocationTests.swift in Sources */,
+				C4A7B19E2D5F4C0A9E61B3D1 /* ChatPipelineTests.swift in Sources */,
 				48852DA90045B2C1A9F99F8C /* LargeLibraryPerformanceTests.swift in Sources */,
 				A7C0FFEE0000000000000003 /* MobiParserTests.swift in Sources */,
 				A7C0FFEE0000000000000005 /* CHMParserTests.swift in Sources */,

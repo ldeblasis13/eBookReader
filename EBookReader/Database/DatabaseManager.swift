@@ -237,6 +237,20 @@ final class DatabaseManager: Sendable {
             try db.create(index: "idx_recipeHint_score", on: "recipeHint", columns: ["score"])
         }
 
+        migrator.registerMigration("v8_pooledEmbeddings") { db in
+            try DatabaseManager.clearEmbeddingsForRebuild(db)
+        }
+
         return migrator
+    }
+
+    /// Stored vectors were read from llama.cpp's raw per-token output;
+    /// LLMEngine.embed now returns pooled sentence embeddings, and the two
+    /// aren't comparable. Clears the old vectors and flags so startup
+    /// embedding indexing rebuilds them. Chunk rows stay (with their recipe
+    /// hints) — EmbeddingManager re-embeds them in place.
+    static func clearEmbeddingsForRebuild(_ db: Database) throws {
+        try db.execute(sql: "UPDATE textChunk SET embedding = NULL WHERE embedding IS NOT NULL")
+        try db.execute(sql: "UPDATE book SET embeddingIndexed = 0 WHERE embeddingIndexed = 1")
     }
 }

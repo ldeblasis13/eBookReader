@@ -191,8 +191,11 @@ actor HybridSearchManager {
             // ftsContent so the user gets the venison recipe back instead
             // of "no matches". This is the difference between "search
             // works" and "search shrugs because the embedding pipeline
-            // hasn't caught up".
-            if chunkResults.isEmpty && !ftsBookIds.isEmpty {
+            // hasn't caught up". Not gated on the book-level `ftsResults`:
+            // that query takes a library-wide top 200 before scoping, so in
+            // a large library it can come back empty for the collection
+            // while searchChunks (scoped in SQL) still finds the hits.
+            if chunkResults.isEmpty {
                 let ftsChunks = await ftsManager.searchChunks(
                     query: query,
                     scopedBookIds: scopedBookIds,

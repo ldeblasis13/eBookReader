@@ -14,6 +14,9 @@ actor ChatManager {
 
     private let maxContextChunks = 10
     private let maxResponseTokens = 2048
+    /// Prompt budget used only when the generation model can't report its
+    /// own (it failed to load, so generate() will surface that error anyway).
+    private let fallbackPromptTokenBudget = 8192
     /// Max words per summarization batch (~6000 tokens fits comfortably in context)
     private let summaryBatchWords = 4000
 
@@ -152,8 +155,14 @@ actor ChatManager {
             logger.info("Cookbook context: \(topResults.count) chunks, \(recipeHits) recipe-hinted, ~\(totalWords) words, chunkIds=\(chunkIds)")
         }
 
-        // Step 2: Build prompt with FULL chunk text (never truncated) and stable IDs.
-        let prompt = buildPrompt(userQuery: text, context: topResults, history: history, isCookbookMode: isCookbookMode)
+        // Step 2: Build prompt with full chunk text and stable IDs, within the
+        // model's context. If it doesn't all fit, the lowest-ranked excerpts
+        // are trimmed or dropped — never the system prompt or the question.
+        let built = await buildPrompt(userQuery: text, context: topResults, history: history, isCookbookMode: isCookbookMode)
+        let promptResults = Array(topResults.prefix(built.includedExcerptCount))
+        if promptResults.count < topResults.count || built.lastExcerptTrimmed {
+            logger.warning("Prompt budget: kept \(promptResults.count) of \(topResults.count) excerpts (last one trimmed: \(built.lastExcerptTrimmed))")
+        }
 
         // Step 3: Generate response. Cookbook mode uses low temperature (extraction task).
         let temperature: Float = isCookbookMode ? 0.1 : 0.7
@@ -162,7 +171,7 @@ actor ChatManager {
         let responseText: String
         do {
             responseText = try await llmEngine.generate(
-                prompt: prompt,
+                prompt: built.prompt,
                 maxTokens: maxResponseTokens,
                 temperature: temperature,
                 topP: topP
@@ -173,12 +182,12 @@ actor ChatManager {
             responseText = "Unable to generate: \(error.localizedDescription). Debug: \(extra)"
         }
 
-        // Step 4: Build references.
+        // Step 4: Build references from the excerpts the model actually saw.
         // Cookbook mode: keep ALL chunk references (multiple recipes from same book OK).
         // General mode: dedupe by book.
         let references: [ChatMessage.BookReference]
         if isCookbookMode {
-            references = topResults.compactMap { result in
+            references = promptResults.compactMap { result in
                 guard !result.snippet.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
                 return ChatMessage.BookReference(
                     bookId: result.bookId,
@@ -191,7 +200,7 @@ actor ChatManager {
             }
         } else {
             var seenBooks = Set<UUID>()
-            references = topResults.compactMap { result in
+            references = promptResults.compactMap { result in
                 guard !result.snippet.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
                 guard !seenBooks.contains(result.bookId) else { return nil }
                 seenBooks.insert(result.bookId)
@@ -214,7 +223,7 @@ actor ChatManager {
         // the position the Open button needs.
         let parsedRecipes: [ChatMessage.ParsedRecipe]
         if isCookbookMode {
-            let sources = topResults.enumerated().map { (i, result) in
+            let sources = promptResults.enumerated().map { (i, result) in
                 RecipeResponseParser.ExcerptSource(
                     excerptIndex: i + 1,
                     bookId: result.bookId,
@@ -224,7 +233,7 @@ actor ChatManager {
                 )
             }
             parsedRecipes = RecipeResponseParser.parse(responseText, sources: sources)
-            logger.info("Cookbook response: \(parsedRecipes.count) recipe card(s) parsed from \(topResults.count) excerpt(s)")
+            logger.info("Cookbook response: \(parsedRecipes.count) recipe card(s) parsed from \(promptResults.count) excerpt(s)")
         } else {
             parsedRecipes = []
         }
@@ -292,49 +301,46 @@ actor ChatManager {
 
     /// Builds the LLM prompt. Uses `result.fullText` (NOT snippet) so the model
     /// sees the complete chunk plus any adjacent context the search expanded into.
+    /// Sections are measured with the generation model's tokenizer so the
+    /// prompt fits its context; see `ChatPromptBuilder` for what gives way.
     private func buildPrompt(
         userQuery: String,
         context: [HybridSearchManager.HybridSearchResult],
         history: [ChatMessage],
         isCookbookMode: Bool = false
-    ) -> String {
+    ) async -> ChatPromptBuilder.Result {
         let systemPrompt = isCookbookMode ? cookbookSystemPrompt : librarySystemPrompt
-        var prompt = "<start_of_turn>user\n\(systemPrompt)\n"
-
-        if !context.isEmpty {
-            prompt += "\nBEGIN BOOK EXCERPTS (this is the ONLY information you may use to answer):\n\n"
-            for (i, result) in context.enumerated() {
-                let titleEsc = result.title.replacingOccurrences(of: "\"", with: "\\\"")
-                let chunkIdStr = result.chunkId.map(String.init) ?? "n/a"
-                let recipeMark = result.isRecipeHit ? " | recipe-hint" : ""
-                let header = isCookbookMode
-                    ? "[excerpt \(i + 1) | \"\(titleEsc)\" | id=\(chunkIdStr)\(recipeMark)]"
-                    : "--- Excerpt [\(i + 1)] from \"\(titleEsc)\" ---"
-                prompt += "\(header)\n"
-                prompt += "\(result.fullText)\n\n"  // FULL TEXT, NEVER TRUNCATED
-            }
-            prompt += "END BOOK EXCERPTS\n"
-        } else {
-            prompt += "\nNo relevant excerpts were found in the user's book library.\n"
+        let excerpts = context.enumerated().map { (i, result) in
+            let titleEsc = result.title.replacingOccurrences(of: "\"", with: "\\\"")
+            let chunkIdStr = result.chunkId.map(String.init) ?? "n/a"
+            let recipeMark = result.isRecipeHit ? " | recipe-hint" : ""
+            let header = isCookbookMode
+                ? "[excerpt \(i + 1) | \"\(titleEsc)\" | id=\(chunkIdStr)\(recipeMark)]"
+                : "--- Excerpt [\(i + 1)] from \"\(titleEsc)\" ---"
+            return ChatPromptBuilder.Excerpt(header: header, text: result.fullText)
         }
 
-        // Conversation history (skip in cookbook mode — extraction is stateless).
-        if !isCookbookMode {
-            let recentHistory = history.suffix(8)
-            for msg in recentHistory {
-                switch msg.role {
-                case .user:
-                    prompt += "<end_of_turn>\n<start_of_turn>user\n\(msg.content)<end_of_turn>\n"
-                case .assistant:
-                    prompt += "<start_of_turn>model\n\(msg.content)<end_of_turn>\n"
-                case .system:
-                    break
+        let llmEngine = self.llmEngine
+        let modelBudget = try? await llmEngine.promptTokenBudget(maxResponseTokens: maxResponseTokens)
+        let modelLoaded = modelBudget != nil
+
+        return await ChatPromptBuilder.build(
+            systemPrompt: systemPrompt,
+            excerpts: excerpts,
+            // Cookbook extraction is stateless — no conversation history.
+            history: isCookbookMode ? [] : history,
+            question: userQuery,
+            tokenBudget: modelBudget ?? fallbackPromptTokenBudget,
+            countTokens: { texts in
+                // If the model didn't load, estimate rather than retrying the
+                // load per call; ~3 chars per token overestimates English, so
+                // the estimate errs toward fitting.
+                if modelLoaded, let counts = try? await llmEngine.countTokens(texts) {
+                    return counts
                 }
+                return texts.map { $0.utf8.count / 3 + 1 }
             }
-        }
-
-        prompt += "\nUser question: \(userQuery)<end_of_turn>\n<start_of_turn>model\n"
-        return prompt
+        )
     }
 
     // MARK: - Book Summarization (Map-Reduce)
@@ -445,5 +451,214 @@ actor ChatManager {
         }
 
         return batches
+    }
+}
+
+// MARK: - Prompt Assembly
+
+/// Builds Gemma chat prompts that fit the generation model's context.
+///
+/// Gemma has no system role, so the system prompt opens the first user turn.
+/// Earlier exchanges follow as alternating user/model turns, and the final
+/// user turn carries this question's excerpts and the question itself. When
+/// it doesn't all fit, the oldest history goes first, then excerpts from the
+/// lowest-ranked end (the last one kept may be trimmed). The system prompt
+/// and the question are never cut.
+enum ChatPromptBuilder {
+    struct Excerpt: Sendable {
+        let header: String
+        let text: String
+    }
+
+    struct Result: Sendable {
+        let prompt: String
+        /// Number of excerpts in the prompt. Always a prefix of the input, so
+        /// "excerpt N" in the prompt still refers to `excerpts[N - 1]`.
+        let includedExcerptCount: Int
+        /// True when the last included excerpt was cut short to fit.
+        let lastExcerptTrimmed: Bool
+        /// Prior messages kept in the prompt (user and model turns).
+        let includedHistoryCount: Int
+    }
+
+    /// Slack for counting sections separately rather than the joined prompt.
+    static let safetyMarginTokens = 64
+    /// History may take at most this share of the room left after the system
+    /// prompt and question, so a long conversation can't crowd out the
+    /// excerpts the answer has to come from.
+    static let maxHistoryShare = 0.25
+    static let maxHistoryExchanges = 4
+    /// A trimmed excerpt shorter than this isn't worth including.
+    static let minTrimmedExcerptTokens = 128
+
+    static let excerptsOpening = "\nBEGIN BOOK EXCERPTS (this is the ONLY information you may use to answer):\n\n"
+    static let excerptsClosing = "END BOOK EXCERPTS\n"
+    static let noExcerptsNote = "\nNo relevant excerpts were found in the user's book library.\n"
+    static let trimMarker = " […]"
+
+    /// One answered question from earlier in the conversation.
+    private struct Exchange {
+        let user: String
+        let model: String
+    }
+
+    /// - Parameters:
+    ///   - excerpts: Best-ranked first.
+    ///   - history: The chat so far. A trailing user message is treated as
+    ///     the current question and left out (the session appends it before
+    ///     asking), so the question appears exactly once.
+    ///   - tokenBudget: Prompt tokens the model accepts, including BOS.
+    ///   - countTokens: Token count for each text, in order.
+    static func build(
+        systemPrompt: String,
+        excerpts: [Excerpt],
+        history: [ChatMessage],
+        question: String,
+        tokenBudget: Int,
+        countTokens: @Sendable ([String]) async -> [Int]
+    ) async -> Result {
+        let candidates = Array(exchanges(from: history).suffix(maxHistoryExchanges))
+        let skeleton = assemble(
+            systemPrompt: systemPrompt,
+            exchanges: [],
+            excerptSection: excerptsOpening + excerptsClosing,
+            question: question
+        )
+        let exchangeTexts = candidates.map(exchangeText)
+        let blocks = excerpts.map { excerptBlock(header: $0.header, text: $0.text) }
+
+        // One batched count for everything; only trimming needs more.
+        let costs = await countTokens([skeleton] + exchangeTexts + blocks)
+        let exchangeCosts = costs[1..<(1 + exchangeTexts.count)]
+        let blockCosts = costs[(1 + exchangeTexts.count)...]
+
+        // +1 for the BOS token generate() adds.
+        var room = tokenBudget - costs[0] - 1 - safetyMarginTokens
+
+        // History: newest exchanges first, whole exchanges only.
+        var historyRoom = Int(Double(max(room, 0)) * maxHistoryShare)
+        var keptExchanges: [Exchange] = []
+        for (exchange, cost) in zip(candidates, exchangeCosts).reversed() {
+            guard cost <= historyRoom else { break }
+            keptExchanges.insert(exchange, at: 0)
+            historyRoom -= cost
+            room -= cost
+        }
+
+        // Excerpts: best-ranked first; stop at the first that doesn't fit,
+        // trimming it into the remaining room when that's worthwhile.
+        var keptBlocks: [String] = []
+        var lastTrimmed = false
+        for (index, cost) in zip(excerpts.indices, blockCosts) {
+            if cost <= room {
+                keptBlocks.append(blocks[index])
+                room -= cost
+                continue
+            }
+            if room >= minTrimmedExcerptTokens,
+               let trimmed = await trimmedBlock(excerpts[index], fullCost: cost, toFit: room, countTokens: countTokens) {
+                keptBlocks.append(trimmed)
+                lastTrimmed = true
+            }
+            break
+        }
+
+        let excerptSection = keptBlocks.isEmpty
+            ? noExcerptsNote
+            : excerptsOpening + keptBlocks.joined() + excerptsClosing
+        let prompt = assemble(
+            systemPrompt: systemPrompt,
+            exchanges: keptExchanges,
+            excerptSection: excerptSection,
+            question: question
+        )
+        return Result(
+            prompt: prompt,
+            includedExcerptCount: keptBlocks.count,
+            lastExcerptTrimmed: lastTrimmed,
+            includedHistoryCount: keptExchanges.count * 2
+        )
+    }
+
+    private static func assemble(
+        systemPrompt: String,
+        exchanges: [Exchange],
+        excerptSection: String,
+        question: String
+    ) -> String {
+        var prompt = "<start_of_turn>user\n\(systemPrompt)\n"
+        for (i, exchange) in exchanges.enumerated() {
+            // The system prompt already opened the first user turn.
+            prompt += i == 0 ? "\n" : "<start_of_turn>user\n"
+            prompt += "\(exchange.user)<end_of_turn>\n<start_of_turn>model\n\(exchange.model)<end_of_turn>\n"
+        }
+        if !exchanges.isEmpty {
+            prompt += "<start_of_turn>user\n"
+        }
+        prompt += excerptSection
+        prompt += "\nUser question: \(question)<end_of_turn>\n<start_of_turn>model\n"
+        return prompt
+    }
+
+    private static func exchangeText(_ exchange: Exchange) -> String {
+        "<start_of_turn>user\n\(exchange.user)<end_of_turn>\n<start_of_turn>model\n\(exchange.model)<end_of_turn>\n"
+    }
+
+    private static func excerptBlock(header: String, text: String) -> String {
+        "\(header)\n\(text)\n\n"
+    }
+
+    /// Pairs history into answered exchanges: system messages are skipped,
+    /// back-to-back messages from one side are merged, a leading model reply
+    /// is dropped, and so is a trailing unanswered user message.
+    private static func exchanges(from history: [ChatMessage]) -> [Exchange] {
+        var result: [Exchange] = []
+        var pendingUser: String?
+        var pendingModel: String?
+        for message in history {
+            switch message.role {
+            case .user:
+                if let user = pendingUser, let model = pendingModel {
+                    result.append(Exchange(user: user, model: model))
+                    pendingUser = nil
+                    pendingModel = nil
+                }
+                pendingUser = [pendingUser, message.content].compactMap { $0 }.joined(separator: "\n\n")
+            case .assistant:
+                guard pendingUser != nil else { continue }
+                pendingModel = [pendingModel, message.content].compactMap { $0 }.joined(separator: "\n\n")
+            case .system:
+                continue
+            }
+        }
+        if let user = pendingUser, let model = pendingModel {
+            result.append(Exchange(user: user, model: model))
+        }
+        return result
+    }
+
+    /// Cuts an excerpt's text at a word boundary so its block fits `limit`
+    /// tokens, marking the cut. Nil if nothing useful fits.
+    private static func trimmedBlock(
+        _ excerpt: Excerpt,
+        fullCost: Int,
+        toFit limit: Int,
+        countTokens: @Sendable ([String]) async -> [Int]
+    ) async -> String? {
+        // Start from the proportional estimate, then shrink until it fits.
+        var targetChars = excerpt.text.count * limit / max(fullCost, 1)
+        for _ in 0..<8 {
+            var cut = excerpt.text.prefix(targetChars)
+            if let lastSpace = cut.lastIndex(where: \.isWhitespace) {
+                cut = cut[..<lastSpace]
+            }
+            guard !cut.isEmpty else { return nil }
+            let block = excerptBlock(header: excerpt.header, text: String(cut) + trimMarker)
+            if let cost = await countTokens([block]).first, cost <= limit {
+                return block
+            }
+            targetChars = targetChars * 85 / 100
+        }
+        return nil
     }
 }
