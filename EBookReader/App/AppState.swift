@@ -507,9 +507,9 @@ final class AppState {
             }
         }
 
-        fileWatcher.setChangeHandler { [weak self] changedPaths in
+        fileWatcher.setChangeHandler { [weak self] events in
             Task { @MainActor [weak self] in
-                await self?.handleFileChanges(changedPaths)
+                await self?.handleFileChanges(events)
             }
         }
     }
@@ -575,19 +575,38 @@ final class AppState {
 
     // MARK: - File Change Handling
 
-    private func handleFileChanges(_ paths: Set<String>) async {
-        for path in paths {
-            let url = URL(fileURLWithPath: path)
-            guard FileTypeDetector.isSupportedBookFile(url) else { continue }
+    /// Bumped when watched files go missing or come back, so views showing
+    /// the missing-file warning re-check `Book.isAvailable` (that state lives
+    /// on disk, not in the database, so nothing else would trigger a redraw).
+    private(set) var fileAvailabilityRevision = 0
 
-            if FileManager.default.fileExists(atPath: path) {
-                let exists = (try? await repository.bookExists(atPath: path)) ?? false
-                if !exists { await importSingleBook(url: url) }
-            } else {
-                if let book = try? await repository.fetchBook(byPath: path) {
-                    try? await repository.deleteBook(id: book.id)
-                }
-            }
+    /// `book.isAvailable`, re-evaluated whenever the file watcher sees a
+    /// book file disappear or reappear. Use this from views.
+    func isAvailable(_ book: Book) -> Bool {
+        _ = fileAvailabilityRevision
+        return book.isAvailable
+    }
+
+    /// Book rows are keyed by UUID, not path, and annotations, collections,
+    /// reading position and embeddings cascade from them — so this never
+    /// deletes. Renamed/moved files keep their row with an updated path;
+    /// files that vanish stay in the library, flagged as missing.
+    private func handleFileChanges(_ events: [FileEvent]) async {
+        let plan = await BookRelocationPlanner.plan(for: events, repository: repository)
+
+        let applied = await BookRelocationPlanner.applyRelocations(plan, repository: repository)
+        for relocation in applied {
+            logger.info("Book file moved, keeping library entry: \(relocation.newPath)")
+        }
+        if !plan.missing.isEmpty {
+            logger.info("\(plan.missing.count) book file(s) missing; keeping library entries")
+        }
+        if !plan.missing.isEmpty || !plan.reappeared.isEmpty {
+            fileAvailabilityRevision += 1
+        }
+
+        for path in plan.imports {
+            await importSingleBook(url: URL(fileURLWithPath: path))
         }
     }
 
@@ -851,6 +870,87 @@ final class AppState {
             guard let book = books.first(where: { $0.id == id }) else { continue }
             await deleteBook(book)
         }
+    }
+
+    // MARK: - Delete Confirmation
+
+    /// A library deletion waiting for the user's confirmation; ContentView
+    /// presents it. Deleting a book cascades to its annotations, collection
+    /// memberships, reading position and embeddings, so menus call
+    /// `requestDeleteBooks` / `requestRemoveFolder` rather than deleting directly.
+    struct DeletionRequest: Identifiable {
+        enum Target {
+            case books(Set<UUID>)
+            case folder(WatchedFolder)
+        }
+
+        let id = UUID()
+        let target: Target
+        let title: String
+        let message: String
+        let confirmTitle: String
+    }
+
+    var pendingDeletion: DeletionRequest?
+
+    func requestDeleteBooks(_ bookIDs: Set<UUID>) async {
+        guard !bookIDs.isEmpty else { return }
+        let annotationCount = (try? await annotationRepository.annotationCount(forBooks: Array(bookIDs))) ?? 0
+        let isSingle = bookIDs.count == 1
+        let title: String
+        if isSingle, let id = bookIDs.first {
+            let name = books.first(where: { $0.id == id })?.displayTitle
+            title = name.map { "Delete “\($0)” from Library?" } ?? "Delete 1 Book from Library?"
+        } else {
+            title = "Delete \(bookIDs.count.formatted()) Books from Library?"
+        }
+        let message = Self.deletionMessage(
+            annotationCount: annotationCount,
+            filesNote: isSingle ? "The book file stays on disk." : "The book files stay on disk."
+        )
+        pendingDeletion = DeletionRequest(
+            target: .books(bookIDs),
+            title: title,
+            message: message,
+            confirmTitle: isSingle ? "Delete from Library" : "Delete \(bookIDs.count.formatted()) Books"
+        )
+    }
+
+    func requestRemoveFolder(_ folder: WatchedFolder) async {
+        let bookCount = (try? await repository.countBooks(inFolder: folder.path)) ?? 0
+        let annotationCount = (try? await annotationRepository.annotationCount(inFolder: folder.path)) ?? 0
+        let books = bookCount == 1 ? "1 book" : "\(bookCount.formatted()) books"
+        let message = "Its \(books) will be removed from your library. "
+            + Self.deletionMessage(
+                annotationCount: annotationCount,
+                filesNote: "The folder and its files stay on disk."
+            )
+        pendingDeletion = DeletionRequest(
+            target: .folder(folder),
+            title: "Remove “\(folder.displayName)” from Library?",
+            message: message,
+            confirmTitle: "Remove Folder"
+        )
+    }
+
+    func performDeletion(_ request: DeletionRequest) async {
+        switch request.target {
+        case .books(let bookIDs):
+            await deleteBooks(bookIDs)
+        case .folder(let folder):
+            await removeFolder(folder)
+        }
+    }
+
+    nonisolated static func deletionMessage(annotationCount: Int, filesNote: String) -> String {
+        let annotations: String
+        switch annotationCount {
+        case 0: annotations = "No annotations will be lost."
+        case 1: annotations = "1 annotation will be permanently deleted."
+        default: annotations = "\(annotationCount.formatted()) annotations will be permanently deleted."
+        }
+        return "\(annotations) Reading positions and collection memberships are removed too. "
+            + "This can't be undone. \(filesNote)"
     }
 
     func closeTab(_ tabID: UUID) {

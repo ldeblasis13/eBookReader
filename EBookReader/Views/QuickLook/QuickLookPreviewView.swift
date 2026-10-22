@@ -224,7 +224,7 @@ struct QuickLookPreviewView: View {
 
             Spacer()
 
-            if !book.isAvailable {
+            if !appState.isAvailable(book) {
                 Label("File not found", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.yellow)

@@ -21,6 +21,7 @@
 		203A4B8E1442B117AD5829A7 /* BookRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 729DB4718C7566435F9002E8 /* BookRepositoryTests.swift */; };
 		CB1234567890ABCDEF123451 /* CookbookRetrievalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB1234567890ABCDEF123452 /* CookbookRetrievalTests.swift */; };
 		BD1234567890ABCDEF333333 /* BookDragPayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD1234567890ABCDEF444444 /* BookDragPayloadTests.swift */; };
+		5E1A7B0C2D3E4F5061728393 /* BookRelocationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E1A7B0C2D3E4F5061728394 /* BookRelocationTests.swift */; };
 		2F8A01093FE02D37D4FDE175 /* Annotation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29583FDDA1EDC8E19D150614 /* Annotation.swift */; };
 		323D42BC252F2CA9ED8DED5C /* ChatSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBA5C5E676C1EC7FC586FA55 /* ChatSession.swift */; };
 		3755F7588904DA39358E97F9 /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C811148A6C107EF81E094901 /* SidebarView.swift */; };
@@ -70,6 +71,7 @@
 		DD5ED22ABA3C23B6A39FAF2D /* CHMParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A4A7CBB2DDB1E55F095D1B2 /* CHMParser.swift */; };
 		DED4DFFA08051764794D1F6E /* TextChunk.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4B8A56A685762A431F09299 /* TextChunk.swift */; };
 		E095F00298042E605DFBBD11 /* FileWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99DAC9BDE712BF2A890CD101 /* FileWatcher.swift */; };
+		5E1A7B0C2D3E4F5061728391 /* BookRelocationPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E1A7B0C2D3E4F5061728392 /* BookRelocationPlanner.swift */; };
 		E4C0A16163003970BCE0B8C8 /* HybridSearchManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DECFE72CEA4D7EC1B439D01 /* HybridSearchManager.swift */; };
 		ED4B0B34FC7A2C363D96C0B1 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6244307399622E1CF9A87D59 /* AppState.swift */; };
 		EFD43937EE1CE21AB8421C64 /* FileTypeDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6EF116E2C04BD283754A4E /* FileTypeDetector.swift */; };
@@ -122,6 +124,7 @@
 		729DB4718C7566435F9002E8 /* BookRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookRepositoryTests.swift; sourceTree = "<group>"; };
 		CB1234567890ABCDEF123452 /* CookbookRetrievalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CookbookRetrievalTests.swift; sourceTree = "<group>"; };
 		BD1234567890ABCDEF444444 /* BookDragPayloadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookDragPayloadTests.swift; sourceTree = "<group>"; };
+		5E1A7B0C2D3E4F5061728394 /* BookRelocationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookRelocationTests.swift; sourceTree = "<group>"; };
 		742D5C2FE8274AD77221C123 /* ContentPosition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentPosition.swift; sourceTree = "<group>"; };
 		75358525F072FC634BCC23C0 /* CollectionRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollectionRepository.swift; sourceTree = "<group>"; };
 		7FDC1E260CB3465DB584C208 /* EBookReaderTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = EBookReaderTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -134,6 +137,7 @@
 		93F90E2D8FDAF5623646929E /* WatchedFolderSidebarItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchedFolderSidebarItem.swift; sourceTree = "<group>"; };
 		94F169A0E1364265BC3A4030 /* QuickLookPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookPreviewView.swift; sourceTree = "<group>"; };
 		99DAC9BDE712BF2A890CD101 /* FileWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileWatcher.swift; sourceTree = "<group>"; };
+		5E1A7B0C2D3E4F5061728392 /* BookRelocationPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookRelocationPlanner.swift; sourceTree = "<group>"; };
 		9AF546C1C5230B9144389B7F /* LibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryView.swift; sourceTree = "<group>"; };
 		9C19C0E0CED69F73AF8ED5B2 /* RecipeDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecipeDetector.swift; sourceTree = "<group>"; };
 		RP1234567890ABCDEF222222 /* RecipeResponseParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecipeResponseParser.swift; sourceTree = "<group>"; };
@@ -232,6 +236,7 @@
 		251F447C4377B0E2AD106175 /* Services */ = {
 			isa = PBXGroup;
 			children = (
+				5E1A7B0C2D3E4F5061728392 /* BookRelocationPlanner.swift */,
 				54AD74963BF1E355BD95655B /* ChatManager.swift */,
 				FBE0E4F897F19AA5DDE19F4C /* EmbeddingManager.swift */,
 				99DAC9BDE712BF2A890CD101 /* FileWatcher.swift */,
@@ -311,6 +316,7 @@
 				729DB4718C7566435F9002E8 /* BookRepositoryTests.swift */,
 				CB1234567890ABCDEF123452 /* CookbookRetrievalTests.swift */,
 				BD1234567890ABCDEF444444 /* BookDragPayloadTests.swift */,
+				5E1A7B0C2D3E4F5061728394 /* BookRelocationTests.swift */,
 			);
 			path = DatabaseTests;
 			sourceTree = "<group>";
@@ -537,6 +543,7 @@
 				203A4B8E1442B117AD5829A7 /* BookRepositoryTests.swift in Sources */,
 				CB1234567890ABCDEF123451 /* CookbookRetrievalTests.swift in Sources */,
 				BD1234567890ABCDEF333333 /* BookDragPayloadTests.swift in Sources */,
+				5E1A7B0C2D3E4F5061728393 /* BookRelocationTests.swift in Sources */,
 				48852DA90045B2C1A9F99F8C /* LargeLibraryPerformanceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -574,6 +581,7 @@
 				C5BE6F84DF08A8CEF45DAC34 /* FB2Parser.swift in Sources */,
 				EFD43937EE1CE21AB8421C64 /* FileTypeDetector.swift in Sources */,
 				E095F00298042E605DFBBD11 /* FileWatcher.swift in Sources */,
+				5E1A7B0C2D3E4F5061728391 /* BookRelocationPlanner.swift in Sources */,
 				BB8EFC01E58F814D284E0B9C /* FindBar.swift in Sources */,
 				8D57A233849D834B386622A5 /* FolderScanner.swift in Sources */,
 				B7B41F7ABDBC7B2CE4D1D8FD /* FullTextSearchManager.swift in Sources */,

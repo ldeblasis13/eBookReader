@@ -84,6 +84,36 @@ actor BookRepository {
         }
     }
 
+    /// Points an existing book at its file's new location after a rename or
+    /// move. The row — and with it the book's annotations, collections,
+    /// reading position and embeddings — is kept; only path, name and size change.
+    @discardableResult
+    func relocateBook(id: UUID, toPath newPath: String, fileSize: Int64) throws -> Bool {
+        try dbPool.write { db in
+            try Book.filter(key: id).updateAll(
+                db,
+                Book.Columns.filePath.set(to: newPath),
+                Book.Columns.fileName.set(to: URL(fileURLWithPath: newPath).lastPathComponent),
+                Book.Columns.fileSize.set(to: fileSize)
+            ) > 0
+        }
+    }
+
+    /// Books with any of the given file sizes — candidates when matching a
+    /// file that appeared to a book whose file went missing.
+    func fetchBooks(withFileSizes sizes: Set<Int64>) throws -> [Book] {
+        let sizes = Array(sizes)
+        return try dbPool.read { db in
+            var books: [Book] = []
+            // Chunked to stay well under SQLite's bound-parameter limit.
+            for start in stride(from: 0, to: sizes.count, by: 500) {
+                let chunk = sizes[start..<min(start + 500, sizes.count)]
+                books += try Book.filter(chunk.contains(Book.Columns.fileSize)).fetchAll(db)
+            }
+            return books
+        }
+    }
+
     func deleteBook(id: UUID) throws {
         try dbPool.write { db in
             _ = try Book.deleteOne(db, key: id)

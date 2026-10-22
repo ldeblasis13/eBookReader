@@ -12,6 +12,20 @@ final class DatabaseManager: Sendable {
         category: "Database"
     )
 
+    /// The user's real library. Only Release builds may open it.
+    static let productionDatabaseFileName = "library.sqlite"
+    /// Scratch library for Debug builds run from Xcode, so an older or edited
+    /// build can never migrate (or erase) the real library.
+    static let debugDatabaseFileName = "library-debug.sqlite"
+
+    static var databaseFileName: String {
+        #if DEBUG
+        debugDatabaseFileName
+        #else
+        productionDatabaseFileName
+        #endif
+    }
+
     private init() {
         do {
             let appSupportURL = try FileManager.default.url(
@@ -26,9 +40,15 @@ final class DatabaseManager: Sendable {
                 withIntermediateDirectories: true
             )
 
-            let dbPath = appSupportURL.appendingPathComponent("library.sqlite").path
+            let fileName = Self.databaseFileName
+            let dbPath = appSupportURL.appendingPathComponent(fileName).path
             let config = Configuration()
             dbPool = try DatabasePool(path: dbPath, configuration: config)
+
+            // Wiping on schema change is a Debug convenience, and it is only
+            // allowed on the scratch file — never on the real library.
+            var migrator = Self.makeMigrator()
+            migrator.eraseDatabaseOnSchemaChange = (fileName == Self.debugDatabaseFileName)
             try migrator.migrate(dbPool)
             Self.logger.info("Database initialized at \(dbPath)")
         } catch {
@@ -36,12 +56,10 @@ final class DatabaseManager: Sendable {
         }
     }
 
-    private var migrator: DatabaseMigrator {
+    /// The app's schema. Internal so tests can migrate a scratch database
+    /// with the real schema instead of a hand-copied one.
+    static func makeMigrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
-
-        #if DEBUG
-        migrator.eraseDatabaseOnSchemaChange = true
-        #endif
 
         migrator.registerMigration("v1") { db in
             try db.create(table: "book") { t in

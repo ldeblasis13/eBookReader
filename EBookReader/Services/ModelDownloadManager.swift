@@ -64,13 +64,20 @@ actor ModelDownloadManager {
 
         // Verify existing model files on startup
         for modelId in [Constants.Models.embeddingModelId, Constants.Models.llmModelId] {
-            if let model = try? await repo.fetch(id: modelId), model.status == .ready {
-                let filePath = Constants.Directories.models
-                    .appendingPathComponent(model.fileName).path
-                if !FileManager.default.fileExists(atPath: filePath) {
-                    logger.warning("Model file missing, resetting status: \(model.displayName)")
-                    try? await repo.updateStatus(id: modelId, status: .pending)
-                }
+            guard let model = try? await repo.fetch(id: modelId) else { continue }
+            let filePath = Constants.Directories.models
+                .appendingPathComponent(model.fileName).path
+            let fileExists = FileManager.default.fileExists(atPath: filePath)
+            if model.status == .ready, !fileExists {
+                logger.warning("Model file missing, resetting status: \(model.displayName)")
+                try? await repo.updateStatus(id: modelId, status: .pending)
+            } else if model.status != .ready, fileExists, model.sha256 == nil {
+                // The file is on disk but this database doesn't know it — e.g. a
+                // Debug build (own library-debug.sqlite) reusing the models the
+                // Release build downloaded. Files only get their final name after
+                // a complete download, so this never adopts a partial one.
+                logger.info("Adopting existing model file: \(model.displayName)")
+                try? await repo.markReady(id: modelId, localPath: filePath)
             }
         }
     }

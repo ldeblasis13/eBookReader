@@ -30,9 +30,9 @@ struct WatchedFolderSidebarItem: View {
 
             Divider()
 
-            Button("Remove", role: .destructive) {
+            Button("Remove…", role: .destructive) {
                 Task {
-                    await appState.removeFolder(folder)
+                    await appState.requestRemoveFolder(folder)
                 }
             }
         }
