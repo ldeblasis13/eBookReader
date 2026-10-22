@@ -241,6 +241,17 @@ final class DatabaseManager: Sendable {
             try DatabaseManager.clearEmbeddingsForRebuild(db)
         }
 
+        // Book files the user deleted from the library, so reconciling a
+        // watched folder doesn't import them again.
+        migrator.registerMigration("v9_excludedBookFile") { db in
+            try db.create(table: "excludedBookFile") { t in
+                t.primaryKey("path", .text).notNull()
+                t.column("fileSize", .integer).notNull()
+                t.column("dateExcluded", .datetime).notNull()
+            }
+            try db.create(index: "idx_excludedBookFile_fileSize", on: "excludedBookFile", columns: ["fileSize"])
+        }
+
         return migrator
     }
 

@@ -81,6 +81,13 @@ final class LargeLibraryPerformanceTests: XCTestCase {
                 t.add(column: "embeddingIndexed", .boolean).notNull().defaults(to: false)
             }
         }
+        migrator.registerMigration("v9_excludedBookFile") { db in
+            try db.create(table: "excludedBookFile") { t in
+                t.primaryKey("path", .text).notNull()
+                t.column("fileSize", .integer).notNull()
+                t.column("dateExcluded", .datetime).notNull()
+            }
+        }
         try migrator.migrate(pool)
     }
 

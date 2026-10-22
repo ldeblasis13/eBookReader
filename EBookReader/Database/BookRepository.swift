@@ -84,36 +84,63 @@ actor BookRepository {
         }
     }
 
-    /// Points an existing book at its file's new location after a rename or
-    /// move. The row — and with it the book's annotations, collections,
-    /// reading position and embeddings — is kept; only path, name and size change.
-    @discardableResult
-    func relocateBook(id: UUID, toPath newPath: String, fileSize: Int64) throws -> Bool {
-        try dbPool.write { db in
-            try Book.filter(key: id).updateAll(
-                db,
-                Book.Columns.filePath.set(to: newPath),
-                Book.Columns.fileName.set(to: URL(fileURLWithPath: newPath).lastPathComponent),
-                Book.Columns.fileSize.set(to: fileSize)
-            ) > 0
+    /// Points existing books at their files' new locations after renames or
+    /// moves. The rows — and with them each book's annotations, collections,
+    /// reading position and embeddings — are kept; only path, name and size
+    /// change.
+    ///
+    /// Applies relocations in a few transactions (500 per write) rather than
+    /// one write each, so renaming a big folder wakes the library
+    /// observation a handful of times instead of once per book. A
+    /// relocation that would collide with another row's path (UNIQUE
+    /// filePath) is skipped; skipped ones are retried after the rest, so a
+    /// chain like a→b, b→c still lands. Returns the relocations applied.
+    func relocateBooks(_ relocations: [BookRelocationPlanner.Relocation]) throws -> [BookRelocationPlanner.Relocation] {
+        var pending = relocations
+        var applied: [BookRelocationPlanner.Relocation] = []
+        while !pending.isEmpty {
+            var collided: [BookRelocationPlanner.Relocation] = []
+            for start in stride(from: 0, to: pending.count, by: 500) {
+                let chunk = Array(pending[start..<min(start + 500, pending.count)])
+                let (done, failed) = try dbPool.write { db in
+                    var done: [BookRelocationPlanner.Relocation] = []
+                    var failed: [BookRelocationPlanner.Relocation] = []
+                    for relocation in chunk {
+                        do {
+                            let changed = try Book.filter(key: relocation.bookID).updateAll(
+                                db,
+                                Book.Columns.filePath.set(to: relocation.newPath),
+                                Book.Columns.fileName.set(to: URL(fileURLWithPath: relocation.newPath).lastPathComponent),
+                                Book.Columns.fileSize.set(to: relocation.fileSize)
+                            )
+                            if changed > 0 { done.append(relocation) }
+                        } catch let error as DatabaseError where error.resultCode == .SQLITE_CONSTRAINT {
+                            // Only this statement is rolled back; the transaction goes on.
+                            failed.append(relocation)
+                        }
+                    }
+                    return (done, failed)
+                }
+                applied += done
+                collided += failed
+            }
+            guard collided.count < pending.count else { break }
+            pending = collided
         }
+        return applied
     }
 
     /// Path → id for every book whose file is anywhere under `folderPath`.
     /// Used to diff a folder against what's on disk, so it reads only those
-    /// two columns. A range on filePath rather than LIKE: LIKE is
-    /// case-insensitive and treats `_` and `%` in folder names as
-    /// wildcards, and the range can use the filePath index.
+    /// two columns.
     func fetchBookIDsByPath(under folderPath: String) throws -> [String: UUID] {
-        let prefix = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"
-        // Every path starting with "…/" sorts before "…0" ("0" follows "/").
-        let upperBound = String(prefix.dropLast()) + "0"
+        let range = FolderPathRange(folderPath)
         return try dbPool.read { db in
             var idsByPath: [String: UUID] = [:]
             let rows = try Row.fetchCursor(
                 db,
                 sql: "SELECT id, filePath FROM book WHERE filePath >= ? AND filePath < ?",
-                arguments: [prefix, upperBound]
+                arguments: [range.lowerBound, range.upperBound]
             )
             while let row = try rows.next() {
                 idsByPath[row["filePath"]] = row["id"]
@@ -159,13 +186,94 @@ actor BookRepository {
         }
     }
 
-    func deleteBooksInFolder(_ folderPath: String) throws {
-        // Normalize: ensure trailing "/" so /Books/SciFi doesn't match /Books/SciFi-Archive
-        let normalized = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"
-        _ = try dbPool.write { db in
-            try Book
-                .filter(Book.Columns.filePath.like("\(normalized)%"))
-                .deleteAll(db)
+    /// Deletes a book row and records its file as excluded, so reconciling
+    /// its folder with disk doesn't import it again.
+    func deleteBookExcludingFile(_ book: Book) throws {
+        try dbPool.write { db in
+            try ExcludedBookFile(path: book.filePath, fileSize: book.fileSize).save(db)
+            _ = try Book.deleteOne(db, key: book.id)
+        }
+    }
+
+    /// Deletes every book under `folderPath` (only that folder: /Books/SciFi
+    /// leaves /Books/SciFi-Archive and /Books/scifi alone).
+    ///
+    /// Normally the folder's excluded files are forgotten along with it. If
+    /// the folder sits inside another watched folder, that folder's
+    /// reconcile would import the books again, so pass `recordingExclusions`
+    /// to remember them as deleted instead.
+    func deleteBooksInFolder(_ folderPath: String, recordingExclusions: Bool = false) throws {
+        let range = FolderPathRange(folderPath)
+        try dbPool.write { db in
+            if recordingExclusions {
+                try db.execute(
+                    sql: """
+                        INSERT OR REPLACE INTO excludedBookFile (path, fileSize, dateExcluded)
+                        SELECT filePath, fileSize, ? FROM book WHERE filePath >= ? AND filePath < ?
+                        """,
+                    arguments: [Date(), range.lowerBound, range.upperBound]
+                )
+            } else {
+                _ = try ExcludedBookFile.filter(range.contains(ExcludedBookFile.Columns.path)).deleteAll(db)
+            }
+            _ = try Book.filter(range.contains(Book.Columns.filePath)).deleteAll(db)
+        }
+    }
+
+    // MARK: - Excluded Files
+
+    /// The subset of `paths` the user deleted from the library.
+    func excludedPaths(among paths: [String]) throws -> Set<String> {
+        try dbPool.read { db in
+            var excluded = Set<String>()
+            for start in stride(from: 0, to: paths.count, by: 500) {
+                let chunk = paths[start..<min(start + 500, paths.count)]
+                let found = try String.fetchAll(
+                    db,
+                    ExcludedBookFile
+                        .select(ExcludedBookFile.Columns.path)
+                        .filter(chunk.contains(ExcludedBookFile.Columns.path))
+                )
+                excluded.formUnion(found)
+            }
+            return excluded
+        }
+    }
+
+    /// Excluded files with any of the given sizes — so an excluded file that
+    /// was renamed or moved can be recognised at its new path.
+    func fetchExclusions(withFileSizes sizes: Set<Int64>) throws -> [ExcludedBookFile] {
+        let sizes = Array(sizes)
+        return try dbPool.read { db in
+            var exclusions: [ExcludedBookFile] = []
+            for start in stride(from: 0, to: sizes.count, by: 500) {
+                let chunk = sizes[start..<min(start + 500, sizes.count)]
+                exclusions += try ExcludedBookFile.filter(chunk.contains(ExcludedBookFile.Columns.fileSize)).fetchAll(db)
+            }
+            return exclusions
+        }
+    }
+
+    /// Points exclusions at their files' new paths.
+    func moveExclusions(_ moves: [BookRelocationPlanner.ExclusionMove]) throws {
+        guard !moves.isEmpty else { return }
+        try dbPool.write { db in
+            for move in moves {
+                _ = try ExcludedBookFile
+                    .filter(ExcludedBookFile.Columns.path == move.oldPath)
+                    .updateAll(db, onConflict: .replace, ExcludedBookFile.Columns.path.set(to: move.newPath))
+            }
+        }
+    }
+
+    /// Forgets exclusions for these files: the user added them explicitly.
+    func clearExclusions(forPaths paths: [String]) throws {
+        guard !paths.isEmpty else { return }
+        try dbPool.write { db in
+            for start in stride(from: 0, to: paths.count, by: 500) {
+                let chunk = paths[start..<min(start + 500, paths.count)]
+                _ = try ExcludedBookFile.filter(chunk.contains(ExcludedBookFile.Columns.path)).deleteAll(db)
+            }
         }
     }
 
@@ -238,10 +346,41 @@ actor BookRepository {
         }
     }
 
+    enum FolderRegistration: Equatable, Sendable {
+        case added
+        /// Already a full-import folder.
+        case alreadyWatched
+        /// Was a partial-import folder (books added one by one); now full import.
+        case upgradedFromPartialImport
+    }
+
+    /// Records `path` as a full-import watched folder — the user chose Add
+    /// Folder. A partial-import entry for the same folder (left by Add
+    /// Books) is upgraded in place. Adding a folder explicitly also brings
+    /// back any of its files the user had deleted from the library.
+    func registerFullImportFolder(path: String, bookmarkData: Data) throws -> FolderRegistration {
+        try dbPool.write { db in
+            _ = try ExcludedBookFile
+                .filter(FolderPathRange(path).contains(ExcludedBookFile.Columns.path))
+                .deleteAll(db)
+
+            guard var folder = try WatchedFolder.filter(WatchedFolder.Columns.path == path).fetchOne(db) else {
+                var folder = WatchedFolder(path: path, bookmarkData: bookmarkData)
+                try folder.insert(db)
+                return .added
+            }
+            guard !folder.isFullImport else { return .alreadyWatched }
+            folder.isFullImport = true
+            folder.bookmarkData = bookmarkData
+            try folder.update(db)
+            return .upgradedFromPartialImport
+        }
+    }
+
     func fetchBooks(inFolder folderPath: String) throws -> [Book] {
         try dbPool.read { db in
             try Book
-                .filter(Book.Columns.filePath.like("\(folderPath)/%"))
+                .filter(FolderPathRange(folderPath).contains(Book.Columns.filePath))
                 .fetchAll(db)
         }
     }
@@ -249,7 +388,7 @@ actor BookRepository {
     func countBooks(inFolder folderPath: String) throws -> Int {
         try dbPool.read { db in
             try Book
-                .filter(Book.Columns.filePath.like("\(folderPath)/%"))
+                .filter(FolderPathRange(folderPath).contains(Book.Columns.filePath))
                 .fetchCount(db)
         }
     }
@@ -269,4 +408,25 @@ actor BookRepository {
         }
     }
 
+}
+
+/// File paths anywhere inside a folder, as a half-open range on a path
+/// column: an exact, case-sensitive prefix match that can use the column's
+/// index. (LIKE ignores ASCII case and treats `_` and `%` in folder names
+/// as wildcards, so removing /x/E_Books would also hit /x/EXBooks.)
+struct FolderPathRange: Sendable {
+    /// "folder/"
+    let lowerBound: String
+    /// "folder0": every path starting with "folder/" sorts below it, since
+    /// "0" comes right after "/".
+    let upperBound: String
+
+    init(_ folderPath: String) {
+        lowerBound = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"
+        upperBound = String(lowerBound.dropLast()) + "0"
+    }
+
+    func contains(_ column: some SQLSpecificExpressible) -> SQLExpression {
+        column >= lowerBound && column < upperBound
+    }
 }

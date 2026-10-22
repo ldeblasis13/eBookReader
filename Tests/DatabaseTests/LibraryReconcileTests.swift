@@ -575,6 +575,235 @@ final class LibraryReconcileTests: XCTestCase {
         XCTAssertEqual(existing, ["\(root)/a.epub"])
     }
 
+    func testFolderQueriesDoNotMatchLookalikeFolders() async throws {
+        // `_` was a LIKE wildcard and LIKE ignores ASCII case: removing
+        // /x/E_Books used to delete these neighbours (and their annotations).
+        let folder = "/x/E_Books"
+        var ids: [String: UUID] = [:]
+        for path in ["\(folder)/a.epub", "/x/EXBooks/b.epub", "/x/e_books/c.epub", "/x/E_Books-Archive/d.epub"] {
+            let book = Book(filePath: path, fileName: "f.epub", format: .epub, fileSize: 1)
+            try await bookRepo.insertBook(book)
+            try await annotationRepo.insertAnnotation(Annotation(
+                bookId: book.id,
+                tool: .highlight,
+                position: .pdf(pageIndex: 0, bounds: nil)
+            ))
+            ids[path] = book.id
+        }
+
+        let count = try await bookRepo.countBooks(inFolder: folder)
+        XCTAssertEqual(count, 1)
+        let fetched = try await bookRepo.fetchBooks(inFolder: folder).map(\.filePath)
+        XCTAssertEqual(fetched, ["\(folder)/a.epub"])
+        let annotations = try await annotationRepo.annotationCount(inFolder: folder)
+        XCTAssertEqual(annotations, 1)
+
+        try await bookRepo.deleteBooksInFolder(folder)
+        let remaining = Set(try await bookRepo.fetchAllBooks().map(\.filePath))
+        XCTAssertEqual(remaining, ["/x/EXBooks/b.epub", "/x/e_books/c.epub", "/x/E_Books-Archive/d.epub"])
+        for path in remaining {
+            let kept = try await annotationRepo.annotationCount(forBook: try XCTUnwrap(ids[path]))
+            XCTAssertEqual(kept, 1, "\(path) lost its annotation")
+        }
+    }
+
+    // MARK: - Deleted books stay deleted
+
+    func testDeletedBookIsNotImportedAgain() async throws {
+        let dune = try writeFile("Sci-Fi/Dune.epub", bytes: 5_300)
+        let book = try await insertBookWithUserData(at: dune)
+        try await bookRepo.deleteBookExcludingFile(book)
+
+        let atLaunch = await reconcile()
+        XCTAssertEqual(atLaunch.imports, [], "Delete from Library must survive the launch reconcile")
+
+        let onFolderEvent = await plan([folderEvent(url("Sci-Fi"), flags: FSEventStreamEventFlags(
+            kFSEventStreamEventFlagItemIsDir | kFSEventStreamEventFlagItemCreated
+        ))])
+        XCTAssertEqual(onFolderEvent.imports, [])
+
+        let onDroppedEvents = await plan([FileEvent(
+            path: libraryDir.path,
+            flags: FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs)
+        )])
+        XCTAssertEqual(onDroppedEvents.imports, [])
+
+        let onFileEvent = await plan([FileEvent(
+            path: dune.path,
+            flags: FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsFile | kFSEventStreamEventFlagItemModified)
+        )])
+        XCTAssertEqual(onFileEvent.imports, [])
+    }
+
+    func testDeletedBookStaysDeletedWhenItsFolderIsRenamed() async throws {
+        let dune = try writeFile("Sci-Fi/Dune.epub", bytes: 5_400)
+        let foundation = try writeFile("Sci-Fi/Foundation.epub", bytes: 5_500)
+        let deleted = try await insertBook(at: dune)
+        let kept = try await insertBookWithUserData(at: foundation)
+        try await bookRepo.deleteBookExcludingFile(deleted)
+
+        let oldFolder = url("Sci-Fi")
+        let newFolder = try move(oldFolder, to: url("Science Fiction"))
+        let result = await plan([folderEvent(oldFolder), folderEvent(newFolder)])
+
+        XCTAssertEqual(result.relocations.map(\.bookID), [kept.id])
+        XCTAssertEqual(result.imports, [], "a deleted book must not come back when its folder is renamed")
+        XCTAssertEqual(result.exclusionMoves, [.init(oldPath: dune.path, newPath: url("Science Fiction/Dune.epub").path)])
+        await BookRelocationPlanner.applyRelocations(result, repository: bookRepo)
+        try await assertUserDataIntact(for: kept, nowAt: url("Science Fiction/Foundation.epub"))
+
+        // The exclusion followed the file, so the next launch doesn't import it either.
+        let nextLaunch = await reconcile()
+        XCTAssertEqual(nextLaunch, BookRelocationPlanner.Plan())
+    }
+
+    func testDeletedBookStaysDeletedWhenRenamedWhileClosed() async throws {
+        let original = try writeFile("Herbert/Dnue.epub", bytes: 5_600)
+        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: original))
+        let renamed = try move(original, to: url("Herbert/Dune.epub"))
+
+        let result = await reconcile()
+
+        XCTAssertEqual(result.imports, [])
+        XCTAssertEqual(result.exclusionMoves, [.init(oldPath: original.path, newPath: renamed.path)])
+    }
+
+    func testAddingTheFolderAgainBringsDeletedBooksBack() async throws {
+        let dune = try writeFile("Dune.epub", bytes: 5_700)
+        try await bookRepo.insertWatchedFolder(WatchedFolder(path: libraryDir.path, bookmarkData: Data()))
+        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: dune))
+        let stillDeleted = await reconcile()
+        XCTAssertEqual(stillDeleted.imports, [])
+
+        let registration = try await bookRepo.registerFullImportFolder(path: libraryDir.path, bookmarkData: Data([1]))
+        XCTAssertEqual(registration, .alreadyWatched)
+        let rescan = await reconcile()
+        XCTAssertEqual(rescan.imports, [dune.path])
+    }
+
+    func testAddingTheFileAgainBringsItBack() async throws {
+        let dune = try writeFile("Dune.epub", bytes: 5_800)
+        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: dune))
+
+        try await bookRepo.clearExclusions(forPaths: [dune.path])
+        let result = await reconcile()
+        XCTAssertEqual(result.imports, [dune.path])
+    }
+
+    func testRemovingAFolderForgetsOnlyItsExclusions() async throws {
+        let archiveDir = tempDir.appendingPathComponent("Archive", isDirectory: true)
+        let inside = try writeFile("Dune.epub", bytes: 5_900)
+        let outside = try writeFile("Dune.epub", bytes: 5_900, in: archiveDir)
+        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: inside))
+        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: outside))
+
+        try await bookRepo.deleteBooksInFolder(libraryDir.path)
+
+        let excluded = try await bookRepo.excludedPaths(among: [inside.path, outside.path])
+        XCTAssertEqual(excluded, [outside.path])
+    }
+
+    func testRemovingAFolderInsideAWatchedFolderKeepsItsBooksDeleted() async throws {
+        // Add Books from a subfolder leaves a partial-import entry for it;
+        // removing that entry must not hand its books to the outer folder's
+        // reconcile to import again.
+        let dune = try writeFile("Sci-Fi/Dune.epub", bytes: 6_000)
+        try await insertBook(at: dune)
+
+        try await bookRepo.deleteBooksInFolder(url("Sci-Fi").path, recordingExclusions: true)
+
+        let bookCount = try await bookRepo.bookCount()
+        XCTAssertEqual(bookCount, 0)
+        let result = await reconcile()
+        XCTAssertEqual(result.imports, [])
+    }
+
+    // MARK: - Add Folder after Add Books
+
+    func testAddFolderUpgradesAFolderWhoseBooksWereAddedOneByOne() async throws {
+        // Add Books leaves a partial-import entry for the file's folder.
+        let picked = try writeFile("Dune.epub", bytes: 6_100)
+        let other = try writeFile("Sub/Foundation.epub", bytes: 6_200)
+        let partial = WatchedFolder(path: libraryDir.path, bookmarkData: Data(), isFullImport: false)
+        try await bookRepo.insertWatchedFolder(partial)
+        let pickedBook = try await insertBook(at: picked)
+
+        let registration = try await bookRepo.registerFullImportFolder(path: libraryDir.path, bookmarkData: Data([7]))
+
+        XCTAssertEqual(registration, .upgradedFromPartialImport)
+        let folders = try await bookRepo.fetchAllWatchedFolders()
+        XCTAssertEqual(folders.count, 1, "upgraded in place, not duplicated")
+        XCTAssertEqual(folders.first?.id, partial.id)
+        XCTAssertEqual(folders.first?.isFullImport, true)
+        XCTAssertEqual(folders.first?.bookmarkData, Data([7]))
+
+        // The scan that follows treats it as a full-import root, so the rest of
+        // the folder is imported and the book added earlier is kept as is.
+        let fullImportRoots = folders.filter(\.isFullImport).map(\.path)
+        let scan = await BookRelocationPlanner.plan(
+            reconcilingFolder: libraryDir.path,
+            repository: bookRepo,
+            watchedRoots: fullImportRoots
+        )
+        XCTAssertEqual(scan.imports, [other.path])
+        XCTAssertEqual(scan.relocations, [])
+        let pickedPath = try await path(of: pickedBook.id)
+        XCTAssertEqual(pickedPath, picked.path)
+    }
+
+    func testAddFolderRegistersANewFolderOnce() async throws {
+        let first = try await bookRepo.registerFullImportFolder(path: libraryDir.path, bookmarkData: Data([1]))
+        let second = try await bookRepo.registerFullImportFolder(path: libraryDir.path, bookmarkData: Data([2]))
+        XCTAssertEqual(first, .added)
+        XCTAssertEqual(second, .alreadyWatched)
+        let folders = try await bookRepo.fetchAllWatchedFolders()
+        XCTAssertEqual(folders.map(\.isFullImport), [true])
+    }
+
+    // MARK: - Applying relocations
+
+    func testFolderRenameIsAppliedInAFewTransactions() async throws {
+        let count = 1_200
+        var books: [Book] = []
+        for i in 0..<count {
+            let file = try writeFile("Big/Book \(i).epub", bytes: 100 + i)
+            books.append(Book(filePath: file.path, fileName: file.lastPathComponent, format: .epub, fileSize: Int64(100 + i)))
+        }
+        try await bookRepo.insertBooks(books)
+        let oldFolder = url("Big")
+        let newFolder = try move(oldFolder, to: url("Bigger"))
+        let result = await plan([folderEvent(oldFolder), folderEvent(newFolder)])
+        XCTAssertEqual(result.relocations.count, count)
+
+        let commits = BookCommitCounter()
+        dbPool.add(transactionObserver: commits)
+        let applied = await BookRelocationPlanner.applyRelocations(result, repository: bookRepo)
+
+        XCTAssertEqual(applied.count, count)
+        XCTAssertLessThanOrEqual(commits.count, 3, "one commit per 500 relocations, not one per book")
+        let moved = try await bookRepo.fetchBooks(inFolder: newFolder.path).count
+        XCTAssertEqual(moved, count)
+    }
+
+    func testRelocationsSkipCollisionsAndLandChains() async throws {
+        let a = Book(filePath: "/L/a.epub", fileName: "a.epub", format: .epub, fileSize: 1)
+        let b = Book(filePath: "/L/b.epub", fileName: "b.epub", format: .epub, fileSize: 2)
+        let c = Book(filePath: "/L/c.epub", fileName: "c.epub", format: .epub, fileSize: 3)
+        let d = Book(filePath: "/L/d.epub", fileName: "d.epub", format: .epub, fileSize: 4)
+        try await bookRepo.insertBooks([a, b, c, d])
+
+        let applied = try await bookRepo.relocateBooks([
+            .init(bookID: a.id, newPath: "/L/b.epub", fileSize: 1),   // b's old path, freed below
+            .init(bookID: b.id, newPath: "/L/e.epub", fileSize: 2),
+            .init(bookID: c.id, newPath: "/L/d.epub", fileSize: 3),   // d stays: collision
+        ])
+
+        XCTAssertEqual(Set(applied.map(\.bookID)), [a.id, b.id])
+        let paths = try await bookRepo.fetchBooks(byIds: [a.id, b.id, c.id, d.id])
+            .reduce(into: [UUID: String]()) { $0[$1.id] = $1.filePath }
+        XCTAssertEqual(paths, [a.id: "/L/b.epub", b.id: "/L/e.epub", c.id: "/L/c.epub", d.id: "/L/d.epub"])
+    }
+
     // MARK: - Scale
 
     func testReconcileOfLargeFolderStaysCheap() async throws {
@@ -610,6 +839,42 @@ final class LibraryReconcileTests: XCTestCase {
         print("Reconcile of \(count) books: \(unchangedSeconds)s unchanged, \(changedSeconds)s with one rename")
         XCTAssertLessThan(unchangedSeconds, 10, "launch reconcile must stay cheap at 25k books")
         XCTAssertLessThan(changedSeconds, 10)
+    }
+}
+
+/// Counts committed transactions that changed the book table.
+private final class BookCommitCounter: TransactionObserver, @unchecked Sendable {
+    private let lock = NSLock()
+    private var commits = 0
+    private var changedBooks = false
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return commits
+    }
+
+    func observes(eventsOfKind eventKind: DatabaseEventKind) -> Bool {
+        eventKind.tableName == "book"
+    }
+
+    func databaseDidChange(with event: DatabaseEvent) {
+        lock.lock()
+        changedBooks = true
+        lock.unlock()
+    }
+
+    func databaseDidCommit(_ db: Database) {
+        lock.lock()
+        if changedBooks { commits += 1 }
+        changedBooks = false
+        lock.unlock()
+    }
+
+    func databaseDidRollback(_ db: Database) {
+        lock.lock()
+        changedBooks = false
+        lock.unlock()
     }
 }
 
