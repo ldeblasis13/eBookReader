@@ -76,6 +76,11 @@ final class LargeLibraryPerformanceTests: XCTestCase {
                 t.add(column: "hasCachedThumbnail", .boolean).notNull().defaults(to: false)
             }
         }
+        migrator.registerMigration("v6") { db in
+            try db.alter(table: "book") { t in
+                t.add(column: "embeddingIndexed", .boolean).notNull().defaults(to: false)
+            }
+        }
         try migrator.migrate(pool)
     }
 
