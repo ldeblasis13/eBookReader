@@ -18,15 +18,38 @@ actor LLMEngine {
     private var isEmbeddingLoaded = false
     private var isGenerationLoaded = false
 
+    /// Terminal state, set once by `shutdown()` and never cleared. Lock-protected
+    /// rather than actor-isolated so the token loop in `generate()` — which holds
+    /// the actor for its whole run — can see it and stop early.
+    private let shutDownFlag = OSAllocatedUnfairLock(initialState: false)
+    private var isBackendFreed = false
+
+    /// True once `shutdown()` has been called. After that no method touches llama.cpp again.
+    nonisolated var isShutDown: Bool {
+        shutDownFlag.withLock { $0 }
+    }
+
     init() {
         llama_backend_init()
     }
 
     /// Must be called before app exit to prevent Metal resource cleanup crash.
-    func shutdown() {
+    ///
+    /// Nonisolated so the flag flips immediately, before we queue for the actor:
+    /// an in-flight generate() stops at its next token, and any embed()/generate()
+    /// queued behind us throws `.shutDown` instead of reloading a model after
+    /// `llama_backend_free()`.
+    nonisolated func shutdown() async {
+        shutDownFlag.withLock { $0 = true }
+        await freeBackend()
+    }
+
+    private func freeBackend() {
+        guard !isBackendFreed else { return }
         unloadEmbeddingModel()
         unloadGenerationModel()
         llama_backend_free()
+        isBackendFreed = true
     }
 
     // MARK: - Model Loading
@@ -34,6 +57,7 @@ actor LLMEngine {
     private var embeddingModelPath: String?
 
     func loadEmbeddingModel(path: String) throws {
+        guard !isShutDown else { throw LLMEngineError.shutDown }
         guard !isEmbeddingLoaded else { return }
         logger.info("Embedding model will be loaded on first use from: \(path)")
         embeddingModelPath = path
@@ -41,6 +65,7 @@ actor LLMEngine {
     }
 
     private func ensureEmbeddingModelLoaded() throws {
+        guard !isShutDown else { throw LLMEngineError.shutDown }
         guard embeddingContext == nil, let path = embeddingModelPath else { return }
         logger.info("Deferred loading embedding model from: \(path)")
 
@@ -71,6 +96,7 @@ actor LLMEngine {
     }
 
     func loadGenerationModel(path: String) throws {
+        guard !isShutDown else { throw LLMEngineError.shutDown }
         guard !isGenerationLoaded else { return }
         logger.info("Generation model will be loaded on first use from: \(path)")
         // Store path for deferred loading — the actual llama_model_load_from_file
@@ -83,6 +109,7 @@ actor LLMEngine {
     private var generationModelPath: String?
 
     private func ensureGenerationModelLoaded() throws {
+        guard !isShutDown else { throw LLMEngineError.shutDown }
         guard generationContext == nil, let path = generationModelPath else { return }
         logger.info("Deferred loading generation model from: \(path)")
 
@@ -225,6 +252,7 @@ actor LLMEngine {
         var result: Int32 = 0
         var i: Int32 = 0
         while i < nTokens {
+            if isShutDown { throw LLMEngineError.shutDown }
             let batchSize = min(nBatch, nTokens - i)
             var batchTokens = Array(tokens[Int(i)..<Int(i + batchSize)])
             let batch = llama_batch_get_one(&batchTokens, batchSize)
@@ -243,6 +271,7 @@ actor LLMEngine {
             llama_sampler_chain_add(sampler, llama_sampler_init_top_p(topP, 1))
             llama_sampler_chain_add(sampler, llama_sampler_init_dist(UInt32.random(in: 0...UInt32.max)))
         }
+        defer { llama_sampler_free(sampler) }
 
         // Generate tokens — hard stop before context overflow
         var output = ""
@@ -252,6 +281,9 @@ actor LLMEngine {
         let hardLimit = nCtx - 2 // never reach the absolute edge
 
         for _ in 0..<maxTokens {
+            // App is quitting: don't make shutdown() wait for the full maxTokens.
+            if isShutDown { throw LLMEngineError.shutDown }
+
             // CRASH PREVENTION: stop before overflowing context
             if nCur >= hardLimit {
                 logger.warning("Stopping generation: context limit reached (\(nCur)/\(nCtx))")
@@ -284,7 +316,6 @@ actor LLMEngine {
             nCur += 1
         }
 
-        llama_sampler_free(sampler)
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -295,6 +326,8 @@ actor LLMEngine {
         if let model = embeddingModel { llama_model_free(model) }
         embeddingContext = nil
         embeddingModel = nil
+        // Clear the path too, or the next embed() would lazily reload the model.
+        embeddingModelPath = nil
         isEmbeddingLoaded = false
         logger.info("Embedding model unloaded")
     }
@@ -304,6 +337,7 @@ actor LLMEngine {
         if let model = generationModel { llama_model_free(model) }
         generationContext = nil
         generationModel = nil
+        generationModelPath = nil
         isGenerationLoaded = false
         logger.info("Generation model unloaded")
     }
@@ -331,12 +365,14 @@ enum LLMEngineError: Error, LocalizedError {
     case modelNotLoaded
     case tokenizationFailed
     case inferenceFailed
+    case shutDown
 
     var errorDescription: String? {
         switch self {
         case .modelNotLoaded: "ML model not loaded"
         case .tokenizationFailed: "Failed to tokenize input"
         case .inferenceFailed: "Model inference failed"
+        case .shutDown: "ML engine has shut down"
         }
     }
 }

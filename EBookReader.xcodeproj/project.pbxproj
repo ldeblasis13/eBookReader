@@ -78,6 +78,8 @@
 		FA14A38C35B11D4441D1782A /* RecipeCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C41343C0F9C98E94F16D0075 /* RecipeCardView.swift */; };
 		FCA86632A60429A890055A03 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1751D73141F01E3D91DE3278 /* Assets.xcassets */; };
 		FD153A230C2D31C2ED304C70 /* BookFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E9193457CE9D206D0EBC8FC /* BookFormat.swift */; };
+		A7C0FFEE0000000000000003 /* MobiParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C0FFEE0000000000000002 /* MobiParserTests.swift */; };
+		A7C0FFEE0000000000000005 /* CHMParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7C0FFEE0000000000000004 /* CHMParserTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -162,6 +164,8 @@
 		F240CA0B303B8A2B7DFE1AC3 /* SearchResultsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchResultsView.swift; sourceTree = "<group>"; };
 		F5445DFCBF2E97E68638C9D6 /* Collection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Collection.swift; sourceTree = "<group>"; };
 		FBE0E4F897F19AA5DDE19F4C /* EmbeddingManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddingManager.swift; sourceTree = "<group>"; };
+		A7C0FFEE0000000000000002 /* MobiParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobiParserTests.swift; sourceTree = "<group>"; };
+		A7C0FFEE0000000000000004 /* CHMParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CHMParserTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -300,9 +304,19 @@
 			isa = PBXGroup;
 			children = (
 				7B5FFA4A263086BFDDEFC63D /* DatabaseTests */,
+				A7C0FFEE0000000000000001 /* ParserTests */,
 				C63026C0D7F0C3BBF3090FE9 /* PerformanceTests */,
 			);
 			path = Tests;
+			sourceTree = "<group>";
+		};
+		A7C0FFEE0000000000000001 /* ParserTests */ = {
+			isa = PBXGroup;
+			children = (
+				A7C0FFEE0000000000000002 /* MobiParserTests.swift */,
+				A7C0FFEE0000000000000004 /* CHMParserTests.swift */,
+			);
+			path = ParserTests;
 			sourceTree = "<group>";
 		};
 		7B5FFA4A263086BFDDEFC63D /* DatabaseTests */ = {
@@ -538,6 +552,8 @@
 				CB1234567890ABCDEF123451 /* CookbookRetrievalTests.swift in Sources */,
 				BD1234567890ABCDEF333333 /* BookDragPayloadTests.swift in Sources */,
 				48852DA90045B2C1A9F99F8C /* LargeLibraryPerformanceTests.swift in Sources */,
+				A7C0FFEE0000000000000003 /* MobiParserTests.swift in Sources */,
+				A7C0FFEE0000000000000005 /* CHMParserTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
