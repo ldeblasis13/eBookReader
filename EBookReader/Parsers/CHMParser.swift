@@ -70,7 +70,11 @@ actor CHMParser {
     // MARK: - Public API
 
     func parse(bookURL: URL) async throws -> CHMContent {
-        let data = try Data(contentsOf: bookURL)
+        try parse(data: Data(contentsOf: bookURL))
+    }
+
+    /// Parses an in-memory CHM file. Malformed input throws a `CHMError`.
+    func parse(data: Data) throws -> CHMContent {
         guard data.count >= 56 else { throw CHMError.fileTooSmall }
 
         let header = try parseITSFHeader(data)
@@ -151,10 +155,14 @@ actor CHMParser {
     // MARK: - Directory Parsing
 
     private func parseDirectory(_ data: Data, header: ITSFHeader) throws -> [DirectoryEntry] {
-        // The directory is stored in section 1
-        let dirStart = Int(header.section1Offset)
-        let dirEnd = dirStart + Int(header.section1Length)
-        guard dirStart >= 0, dirEnd <= data.count, dirEnd > dirStart else {
+        // The directory is stored in section 1. Offsets come straight from the
+        // file, so convert and add without trapping.
+        guard let dirStart = Int(exactly: header.section1Offset),
+              let dirLength = Int(exactly: header.section1Length) else {
+            throw CHMError.directoryParsingFailed
+        }
+        let (dirEnd, overflow) = dirStart.addingReportingOverflow(dirLength)
+        guard !overflow, dirEnd <= data.count, dirEnd > dirStart else {
             throw CHMError.directoryParsingFailed
         }
 
@@ -285,10 +293,8 @@ actor CHMParser {
 
         if entry.section == 0 {
             // Uncompressed content — directly accessible
-            let contentStart = Int(header.contentOffset) + entry.offset
-            let contentEnd = contentStart + entry.length
-            guard contentStart >= 0, contentEnd <= data.count else { return nil }
-            return data.subdata(in: contentStart..<contentEnd)
+            guard let range = contentRange(of: entry, header: header, dataCount: data.count) else { return nil }
+            return data.subdata(in: range)
         }
 
         // Section 1 (LZX compressed) — attempt to find reset table and decompress
@@ -303,15 +309,10 @@ actor CHMParser {
 
         // The compressed content is stored starting at contentOffset
         // For basic CHM files, we can attempt to read with the reset table
-        let contentBase = Int(header.contentOffset)
-        guard contentBase + entry.offset + entry.length <= data.count else { return nil }
-
         // Try reading directly (works if the content happens to be accessible)
-        let start = contentBase + entry.offset
-        let end = start + entry.length
-        guard start >= 0, end <= data.count else { return nil }
+        guard let range = contentRange(of: entry, header: header, dataCount: data.count) else { return nil }
 
-        let extracted = data.subdata(in: start..<end)
+        let extracted = data.subdata(in: range)
 
         // Validate it looks like valid content (HTML/text)
         if let str = String(data: extracted, encoding: .utf8), !str.isEmpty {
@@ -322,6 +323,20 @@ actor CHMParser {
         }
 
         return nil
+    }
+
+    /// Byte range of an entry's content: contentOffset + entry.offset, entry.length
+    /// bytes long. Both come from the file (contentOffset is a UInt64, and the
+    /// encoded ints can reach Int.max), so returns nil on overflow or out-of-bounds
+    /// instead of trapping.
+    private func contentRange(of entry: DirectoryEntry, header: ITSFHeader, dataCount: Int) -> Range<Int>? {
+        guard let base = Int(exactly: header.contentOffset),
+              entry.offset >= 0, entry.length > 0 else { return nil }
+        let (start, startOverflow) = base.addingReportingOverflow(entry.offset)
+        guard !startOverflow else { return nil }
+        let (end, endOverflow) = start.addingReportingOverflow(entry.length)
+        guard !endOverflow, end <= dataCount else { return nil }
+        return start..<end
     }
 
     // MARK: - Metadata Extraction

@@ -83,6 +83,11 @@ actor EmbeddingManager {
                     guard let chunkId = batch[i].id else { continue }
                     updates.append((id: chunkId, embedding: TextChunk.embeddingToData(embedding)))
                 }
+            } catch LLMEngineError.shutDown {
+                // App is quitting. Leave the book unflagged so the next launch
+                // re-indexes it instead of keeping a half-embedded book.
+                logger.info("Embedding stopped (engine shut down): \(book.displayTitle)")
+                return
             } catch {
                 logger.error("Embedding batch failed at \(batchStart): \(error)")
                 continue
@@ -146,6 +151,9 @@ actor EmbeddingManager {
         var completed = 0
 
         for book in unindexedBooks {
+            // Stop between books when this pass is cancelled (superseded by a
+            // newer pass, or the app is quitting).
+            guard !Task.isCancelled, !llmEngine.isShutDown else { break }
             await indexBook(book)
             completed += 1
             onProgress(completed, total)

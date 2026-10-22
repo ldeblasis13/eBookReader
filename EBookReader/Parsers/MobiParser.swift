@@ -38,6 +38,7 @@ actor MobiParser {
         case invalidMOBIHeader
         case unsupportedCompression(UInt16)
         case decompressionFailed
+        case noTextRecords
 
         var errorDescription: String? {
             switch self {
@@ -46,6 +47,7 @@ actor MobiParser {
             case .invalidMOBIHeader: "Invalid MOBI header"
             case .unsupportedCompression(let t): "Unsupported compression type: \(t)"
             case .decompressionFailed: "Failed to decompress text content"
+            case .noTextRecords: "Mobi file contains no text records"
             }
         }
     }
@@ -75,7 +77,11 @@ actor MobiParser {
     // MARK: - Public API
 
     func parse(bookURL: URL) async throws -> MobiContent {
-        let data = try Data(contentsOf: bookURL)
+        try parse(data: Data(contentsOf: bookURL))
+    }
+
+    /// Parses an in-memory Mobi file. Malformed input throws a `MobiError`.
+    func parse(data: Data) throws -> MobiContent {
         guard data.count >= 78 else { throw MobiError.fileTooSmall }
 
         let pdb = try parsePDB(data)
@@ -303,10 +309,18 @@ actor MobiParser {
 
     // MARK: - Text Decompression
 
+    /// Number of text records (records 1...n) actually present in the file.
+    /// Throws rather than returning 0, because `1...0` traps.
+    private func availableTextRecordCount(pdb: PDBHeader, record0: Record0Info) throws -> Int {
+        let count = min(Int(record0.textRecordCount), pdb.numRecords - 1)
+        guard count >= 1 else { throw MobiError.noTextRecords }
+        return count
+    }
+
     private func extractUncompressed(_ data: Data, pdb: PDBHeader, record0: Record0Info) throws -> String {
         let encoding: String.Encoding = record0.encoding == 65001 ? .utf8 : .windowsCP1252
         var textData = Data()
-        let count = min(Int(record0.textRecordCount), pdb.numRecords - 1)
+        let count = try availableTextRecordCount(pdb: pdb, record0: record0)
 
         for i in 1...count {
             let start = Int(pdb.recordOffsets[i])
@@ -320,9 +334,11 @@ actor MobiParser {
 
     private func decompressPalmDOC(_ data: Data, pdb: PDBHeader, record0: Record0Info) throws -> String {
         let encoding: String.Encoding = record0.encoding == 65001 ? .utf8 : .windowsCP1252
+        let count = try availableTextRecordCount(pdb: pdb, record0: record0)
         var textData = Data()
-        textData.reserveCapacity(Int(record0.textLength))
-        let count = min(Int(record0.textRecordCount), pdb.numRecords - 1)
+        // textLength is untrusted (up to 4 GB). PalmDOC LZ77 expands its
+        // input by at most ~5×, so cap the hint at 8× the file size and 64 MB.
+        textData.reserveCapacity(min(Int(record0.textLength), data.count * 8, 64 << 20))
 
         for i in 1...count {
             let start = Int(pdb.recordOffsets[i])

@@ -155,9 +155,7 @@ struct ChatPanelView: View {
         appState.chatSession.inputText = ""
         appState.chatSession.appendUserMessage(text)
 
-        Task {
-            await appState.sendChatMessage(text)
-        }
+        appState.submitChatMessage(text)
     }
 
     private func openBookReference(_ ref: ChatMessage.BookReference) {

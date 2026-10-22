@@ -149,9 +149,13 @@ final class AppState {
     private var isShuttingDown = false
 
     // Background task handles — kept so we can cancel them before LLM shutdown.
+    private var startTask: Task<Void, Never>?
     private var backgroundStartupTask: Task<Void, Never>?
     private var preloadTask: Task<Void, Never>?
     private var embeddingTask: Task<Void, Never>?
+    /// Fire-and-forget work that can reach the LLM (cookbook onboarding, recipe
+    /// detection, chat sends). Each task removes itself when it finishes.
+    private var trackedTasks: [UUID: Task<Void, Never>] = [:]
 
     init() {
         // Lightweight init: only restore UserDefaults. No file I/O, no DB access.
@@ -185,13 +189,28 @@ final class AppState {
 
     /// Call this from a .task modifier on the root view. Runs all heavy initialization
     /// off the main thread so the UI remains responsive.
+    ///
+    /// Idempotent: `.task` runs again whenever a window appears — e.g. after the
+    /// last window was closed and the user reopens one from the Dock — but the
+    /// services (above all the single LLMEngine) must be created once per process.
     func start() async {
+        if startTask == nil {
+            startTask = Task { await self.performStart() }
+        }
+        await startTask?.value
+    }
+
+    private func performStart() async {
         // Initialize the database on a background thread to avoid blocking the main actor.
         let dbPool = await Task.detached(priority: .userInitiated) {
             // This runs off the main actor: directory creation + SQLite open + migrations.
             try? Constants.Directories.ensureDirectoriesExist()
             return DatabaseManager.shared.dbPool
         }.value
+
+        // Quit arrived during the DB open: don't create an LLMEngine that
+        // shutdownForTermination() has already passed by.
+        guard !isShuttingDown else { return }
 
         repository = BookRepository(dbPool: dbPool)
         collectionRepository = CollectionRepository(dbPool: dbPool)
@@ -221,8 +240,10 @@ final class AppState {
 
         // Model download + embedding indexing + preload LLM (non-blocking).
         // Track the handle so we can cancel before LLM shutdown on quit.
+        guard !isShuttingDown else { return }
         backgroundStartupTask = Task {
             await checkAndDownloadModels()
+            guard !Task.isCancelled else { return }
             // Preload generation model in background so chat is instant when opened.
             preloadTask = Task.detached(priority: .background) { [weak self] in
                 guard let self else { return }
@@ -657,7 +678,17 @@ final class AppState {
         // so books imported afterwards were invisible to cookbook search
         // until the next launch. Kick it off in the background — guarded
         // internally against re-entry and missing model.
+        //
+        // Supersede rather than orphan an earlier pass: cancel it (it stops at
+        // the next book boundary), let it unwind, then run a fresh pass that
+        // also covers the books just imported. One handle then covers the
+        // whole chain when shutdownForTermination() cancels it.
+        guard !isShuttingDown else { return }
+        let previous = embeddingTask
+        previous?.cancel()
         embeddingTask = Task { [weak self] in
+            await previous?.value
+            guard !Task.isCancelled else { return }
             await self?.startEmbeddingIndexing()
         }
     }
@@ -1111,10 +1142,11 @@ final class AppState {
     /// Safe to call multiple times; each call enqueues a fresh detection pass.
     private func scheduleRecipeDetection(forBookIds bookIds: [UUID]) {
         guard !bookIds.isEmpty else { return }
-        Task {
+        runTracked {
             self.isRecipeDetecting = true
             self.recipeDetectionProgress = (0, bookIds.count)
             for (i, bookId) in bookIds.enumerated() {
+                if Task.isCancelled { break }
                 await self.recipeDetector.detectRecipes(forBook: bookId)
                 self.recipeDetectionProgress = (i + 1, bookIds.count)
             }
@@ -1165,7 +1197,7 @@ final class AppState {
     /// set and the cookbook is silently empty until next launch.
     private func scheduleCookbookIndexing(forBookIds bookIds: [UUID]) {
         guard !bookIds.isEmpty else { return }
-        Task { [weak self] in
+        runTracked { [weak self] in
             guard let self else { return }
             // 1. Find which books actually need embedding (skip already-indexed).
             let allBooks = (try? await self.repository.fetchBooks(byIds: bookIds)) ?? []
@@ -1176,6 +1208,7 @@ final class AppState {
                 self.isEmbeddingIndexing = true
                 var done = 0
                 for book in unembedded {
+                    if Task.isCancelled { break }
                     await self.embeddingManager.indexBook(book)
                     done += 1
                     self.embeddingIndexingProgress = (done, unembedded.count)
@@ -1184,7 +1217,19 @@ final class AppState {
             }
 
             // 2. Now that chunks exist, run recipe detection.
+            guard !Task.isCancelled else { return }
             self.scheduleRecipeDetection(forBookIds: bookIds)
+        }
+    }
+
+    /// Runs `operation` in a Task that shutdownForTermination() cancels if it is
+    /// still in flight. Refuses new work once shutdown has begun.
+    private func runTracked(_ operation: @escaping @Sendable @MainActor () async -> Void) {
+        guard !isShuttingDown else { return }
+        let id = UUID()
+        trackedTasks[id] = Task { [weak self] in
+            await operation()
+            self?.trackedTasks[id] = nil
         }
     }
 
@@ -1253,6 +1298,14 @@ final class AppState {
     }
 
     // MARK: - Chat
+
+    /// Fire-and-forget entry point for the chat panel. Tracked so quitting
+    /// mid-chat cancels the send instead of leaving it queued on the LLM.
+    func submitChatMessage(_ text: String) {
+        runTracked { [weak self] in
+            await self?.sendChatMessage(text)
+        }
+    }
 
     func sendChatMessage(_ text: String) async {
         chatSession.isGenerating = true
@@ -1375,17 +1428,23 @@ final class AppState {
         prepareForTermination()
 
         // 2. Cancel all in-flight background tasks so they don't queue new
-        //    llama.cpp work after we free the engine below.
+        //    llama.cpp work after we free the engine below. startTask is
+        //    cancelled but kept, so a late start() can't build a second engine.
+        startTask?.cancel()
         backgroundStartupTask?.cancel()
         preloadTask?.cancel()
         embeddingTask?.cancel()
+        for task in trackedTasks.values { task.cancel() }
         backgroundStartupTask = nil
         preloadTask = nil
         embeddingTask = nil
+        trackedTasks.removeAll()
 
         // 3. Await full LLM / Metal shutdown.
-        //    LLMEngine is an actor — this serializes after any currently
-        //    executing inference finishes, then frees models + llama_backend.
+        //    shutdown() flips the engine's stop flag first, so an in-flight
+        //    generate() stops at its next token and anything queued behind it
+        //    throws instead of reloading a model; then it frees models +
+        //    llama_backend on the actor.
         await llmEngine?.shutdown()
 
         // 4. Allow AppKit to proceed with exit().
