@@ -99,6 +99,45 @@ actor BookRepository {
         }
     }
 
+    /// Path → id for every book whose file is anywhere under `folderPath`.
+    /// Used to diff a folder against what's on disk, so it reads only those
+    /// two columns. A range on filePath rather than LIKE: LIKE is
+    /// case-insensitive and treats `_` and `%` in folder names as
+    /// wildcards, and the range can use the filePath index.
+    func fetchBookIDsByPath(under folderPath: String) throws -> [String: UUID] {
+        let prefix = folderPath.hasSuffix("/") ? folderPath : folderPath + "/"
+        // Every path starting with "…/" sorts before "…0" ("0" follows "/").
+        let upperBound = String(prefix.dropLast()) + "0"
+        return try dbPool.read { db in
+            var idsByPath: [String: UUID] = [:]
+            let rows = try Row.fetchCursor(
+                db,
+                sql: "SELECT id, filePath FROM book WHERE filePath >= ? AND filePath < ?",
+                arguments: [prefix, upperBound]
+            )
+            while let row = try rows.next() {
+                idsByPath[row["filePath"]] = row["id"]
+            }
+            return idsByPath
+        }
+    }
+
+    /// The subset of `paths` that already have a book row.
+    func existingBookPaths(among paths: [String]) throws -> Set<String> {
+        try dbPool.read { db in
+            var existing = Set<String>()
+            for start in stride(from: 0, to: paths.count, by: 500) {
+                let chunk = paths[start..<min(start + 500, paths.count)]
+                let found = try String.fetchAll(
+                    db,
+                    Book.select(Book.Columns.filePath).filter(chunk.contains(Book.Columns.filePath))
+                )
+                existing.formUnion(found)
+            }
+            return existing
+        }
+    }
+
     /// Books with any of the given file sizes — candidates when matching a
     /// file that appeared to a book whose file went missing.
     func fetchBooks(withFileSizes sizes: Set<Int64>) throws -> [Book] {
@@ -154,7 +193,13 @@ actor BookRepository {
     func fetchBooks(byIds ids: [UUID]) throws -> [Book] {
         guard !ids.isEmpty else { return [] }
         return try dbPool.read { db in
-            try Book.filter(ids.contains(Book.Columns.id)).fetchAll(db)
+            var books: [Book] = []
+            // Chunked to stay well under SQLite's bound-parameter limit.
+            for start in stride(from: 0, to: ids.count, by: 500) {
+                let chunk = ids[start..<min(start + 500, ids.count)]
+                books += try Book.filter(chunk.contains(Book.Columns.id)).fetchAll(db)
+            }
+            return books
         }
     }
 
