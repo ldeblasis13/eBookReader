@@ -41,15 +41,32 @@ struct EBookReaderApp: App {
     @State private var appState = AppState()
     @Environment(\.openWindow) private var openWindow
 
+    /// True when this process is only the TEST_HOST for EBookReaderTests.
+    /// Xcode sets these for hosted test runs; XCTestConfigurationFilePath can
+    /// be present but empty (Xcode 27), so test for presence, not a value.
+    private static let isHostingUnitTests: Bool = {
+        let env = ProcessInfo.processInfo.environment
+        return env["XCTestConfigurationFilePath"] != nil || env["XCTestBundlePath"] != nil
+    }()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environment(appState)
-                .task {
-                    // Wire the delegate before any background work starts.
-                    appDelegate.appState = appState
-                    await appState.start()
-                }
+            if Self.isHostingUnitTests {
+                // `xcodebuild test` launches the full app as the test host. Skip
+                // the UI and start() so it stays inert: start() would open the
+                // user's real library DB, resolve and watch their folders, run
+                // FTS/embedding indexing and load the LLM — and the runner's
+                // exit() with Metal resources alive then hits ggml_abort.
+                EmptyView()
+            } else {
+                ContentView()
+                    .environment(appState)
+                    .task {
+                        // Wire the delegate before any background work starts.
+                        appDelegate.appState = appState
+                        await appState.start()
+                    }
+            }
         }
         .commands {
             CommandGroup(replacing: .newItem) {}
