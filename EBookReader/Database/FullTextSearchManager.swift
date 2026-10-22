@@ -231,37 +231,34 @@ actor FullTextSearchManager {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !scopedBookIds.isEmpty else { return [] }
         let ftsQuery = buildFTSQuery(trimmed)
-        let scopedStrings = Set(scopedBookIds.map(\.uuidString))
+        // Scope inside the query, before LIMIT. Filtering a global top-N
+        // afterwards loses every in-scope hit once other books outrank them,
+        // which gets more likely as the library grows. FTS5 stores bookId as
+        // text (TextExtractor wrote `.uuidString`), so bind the same form.
+        let placeholders = scopedBookIds.map { _ in "?" }.joined(separator: ",")
+        let arguments: StatementArguments = [ftsQuery]
+            + StatementArguments(scopedBookIds.map(\.uuidString))
+            + [limit]
 
         do {
             return try await dbPool.read { db -> [ChunkHit] in
                 let rows = try Row.fetchAll(db, sql: """
                     SELECT bookId, chunkIndex, text, rank
                     FROM ftsContent
-                    WHERE ftsContent MATCH ?
+                    WHERE ftsContent MATCH ? AND bookId IN (\(placeholders))
                     ORDER BY rank
                     LIMIT ?
-                """, arguments: [ftsQuery, limit * 4])
+                """, arguments: arguments)
 
-                var hits: [ChunkHit] = []
-                hits.reserveCapacity(min(rows.count, limit))
-                for row in rows {
-                    // FTS5 stores bookId as text (TextExtractor wrote it as
-                    // .uuidString). Filter to scope client-side so we keep
-                    // the GRDB binding sane and avoid re-encoding UUIDs into
-                    // the SQL string.
-                    let bookIdStr = row["bookId"] as String
-                    guard scopedStrings.contains(bookIdStr),
-                          let bookUUID = UUID(uuidString: bookIdStr) else { continue }
-                    hits.append(ChunkHit(
+                return rows.compactMap { row in
+                    guard let bookUUID = UUID(uuidString: row["bookId"] as String) else { return nil }
+                    return ChunkHit(
                         bookId: bookUUID,
                         chunkIndex: row["chunkIndex"] as Int,
                         text: row["text"] as String,
                         rank: row["rank"] as Double
-                    ))
-                    if hits.count >= limit { break }
+                    )
                 }
-                return hits
             }
         } catch {
             logger.error("Chunk FTS search failed: \(error)")

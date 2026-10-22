@@ -59,15 +59,31 @@ actor LLMEngine {
         ctxParams.n_threads = Int32(max(1, ProcessInfo.processInfo.processorCount - 2))
         ctxParams.n_threads_batch = ctxParams.n_threads
         ctxParams.embeddings = true
+        // Pool token outputs into one sentence vector. UNSPECIFIED takes the
+        // pooling the GGUF declares; if it declares none, use mean pooling,
+        // which is what sentence-transformers models like MiniLM train with.
+        ctxParams.pooling_type = LLAMA_POOLING_TYPE_UNSPECIFIED
 
-        guard let ctx = llama_init_from_model(model, ctxParams) else {
+        guard var ctx = llama_init_from_model(model, ctxParams) else {
             llama_model_free(model)
             embeddingModel = nil
             isEmbeddingLoaded = false
             throw LLMEngineError.modelNotLoaded
         }
+        let declaredPooling = llama_pooling_type(ctx)
+        if declaredPooling == LLAMA_POOLING_TYPE_NONE || declaredPooling == LLAMA_POOLING_TYPE_RANK {
+            llama_free(ctx)
+            ctxParams.pooling_type = LLAMA_POOLING_TYPE_MEAN
+            guard let meanCtx = llama_init_from_model(model, ctxParams) else {
+                llama_model_free(model)
+                embeddingModel = nil
+                isEmbeddingLoaded = false
+                throw LLMEngineError.modelNotLoaded
+            }
+            ctx = meanCtx
+        }
         embeddingContext = ctx
-        logger.info("Embedding model loaded successfully")
+        logger.info("Embedding model loaded successfully (pooling type \(llama_pooling_type(ctx).rawValue))")
     }
 
     func loadGenerationModel(path: String) throws {
@@ -167,9 +183,11 @@ actor LLMEngine {
         let result = llama_encode(ctx, batch)
         guard result == 0 else { throw LLMEngineError.inferenceFailed }
 
-        // Get embeddings
+        // Read the pooled sentence embedding for sequence 0 (the only one
+        // llama_batch_get_one uses). llama_get_embeddings would return
+        // per-token rows (or NULL once pooling is on), not a sentence vector.
         let nEmbd = Int(llama_model_n_embd(model))
-        guard let embPtr = llama_get_embeddings(ctx) else {
+        guard let embPtr = llama_get_embeddings_seq(ctx, 0) else {
             throw LLMEngineError.inferenceFailed
         }
 
@@ -191,6 +209,47 @@ actor LLMEngine {
         try texts.map { try embed(text: $0) }
     }
 
+    // MARK: - Tokenization
+
+    /// Prompt tokens generate() accepts before truncating, after reserving
+    /// room for `maxResponseTokens`. Lets callers budget a prompt up front.
+    func promptTokenBudget(maxResponseTokens: Int) throws -> Int {
+        try ensureGenerationModelLoaded()
+        guard let ctx = generationContext else { throw LLMEngineError.modelNotLoaded }
+        return Int(Self.promptTokenLimit(contextSize: Int32(llama_n_ctx(ctx)), maxTokens: maxResponseTokens))
+    }
+
+    /// Counts each text in generation-model tokens (no BOS), parsing chat
+    /// template markers like `<start_of_turn>` as the single tokens they are.
+    /// Takes a batch so a caller pays one actor hop, not one per section.
+    func countTokens(_ texts: [String]) throws -> [Int] {
+        try ensureGenerationModelLoaded()
+        guard let model = generationModel else { throw LLMEngineError.modelNotLoaded }
+        let vocab = llama_model_get_vocab(model)
+        return try texts.map { text in
+            try Self.tokenize(text, vocab: vocab, addSpecial: false, initialCapacity: text.utf8.count / 3 + 16).count
+        }
+    }
+
+    private static func promptTokenLimit(contextSize nCtx: Int32, maxTokens: Int) -> Int32 {
+        nCtx - Int32(min(maxTokens, Int(nCtx / 2)))
+    }
+
+    /// llama_tokenize returns the negated required size when the buffer is
+    /// too small. Grow the buffer and retry rather than using a partially
+    /// filled (zeroed) one.
+    private static func tokenize(_ text: String, vocab: OpaquePointer?, addSpecial: Bool, initialCapacity: Int) throws -> [llama_token] {
+        let byteCount = Int32(text.utf8.count)
+        var tokens = [llama_token](repeating: 0, count: max(initialCapacity, 16))
+        var nTokens = llama_tokenize(vocab, text, byteCount, &tokens, Int32(tokens.count), addSpecial, true)
+        if nTokens < 0 && nTokens != Int32.min {
+            tokens = [llama_token](repeating: 0, count: Int(-nTokens))
+            nTokens = llama_tokenize(vocab, text, byteCount, &tokens, Int32(tokens.count), addSpecial, true)
+        }
+        guard nTokens >= 0 else { throw LLMEngineError.tokenizationFailed }
+        return Array(tokens.prefix(Int(nTokens)))
+    }
+
     // MARK: - Generation
 
     func generate(prompt: String, maxTokens: Int = 1024, temperature: Float = 0.7, topP: Float = 0.9) throws -> String {
@@ -204,16 +263,20 @@ actor LLMEngine {
         let nCtx = Int32(llama_n_ctx(ctx))
 
         // Tokenize prompt — leave room for response tokens
-        let safePromptLimit = nCtx - Int32(min(maxTokens, Int(nCtx / 2)))
-        let tokenBufSize = max(safePromptLimit, 1024)
-        var tokens = [llama_token](repeating: 0, count: Int(tokenBufSize))
-        var nTokens = llama_tokenize(vocab, prompt, Int32(prompt.utf8.count), &tokens, tokenBufSize, true, true)
+        let safePromptLimit = Self.promptTokenLimit(contextSize: nCtx, maxTokens: maxTokens)
+        var tokens = try Self.tokenize(prompt, vocab: vocab, addSpecial: true, initialCapacity: Int(max(safePromptLimit, 1024)))
 
-        // If prompt is too long, truncate to fit
-        if nTokens < 0 || nTokens > safePromptLimit {
-            nTokens = min(abs(nTokens), safePromptLimit)
-            logger.warning("Prompt truncated to \(nTokens) tokens (context limit: \(nCtx))")
+        // Still too long? Callers budget their prompts (ChatManager), so this
+        // is a last resort. Cut from the middle: the head holds the
+        // instructions and the tail holds the question plus the model-turn
+        // marker, and losing either one produces garbage.
+        if tokens.count > Int(safePromptLimit) {
+            let tailCount = min(Int(safePromptLimit) / 4, 1024)
+            let headCount = Int(safePromptLimit) - tailCount
+            logger.warning("Prompt truncated from \(tokens.count) to \(safePromptLimit) tokens (context limit: \(nCtx))")
+            tokens = Array(tokens.prefix(headCount) + tokens.suffix(tailCount))
         }
+        let nTokens = Int32(tokens.count)
         guard nTokens > 0 else { throw LLMEngineError.tokenizationFailed }
 
         // Clear memory

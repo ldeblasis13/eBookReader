@@ -17,6 +17,13 @@ class ChatSession {
         messages.append(message)
     }
 
+    /// Appends a reply built by ChatManager as-is, so references and parsed
+    /// recipe cards reach the UI. Rebuilding it from `content` + `references`
+    /// silently dropped `recipes`, and RecipeCardView never rendered.
+    func appendAssistantMessage(_ message: ChatMessage) {
+        messages.append(message)
+    }
+
     func clear() {
         messages.removeAll()
         inputText = ""

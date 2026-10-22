@@ -1201,7 +1201,7 @@ final class AppState {
         }
 
         let response = await chatManager.sendMessage(text, books: scopedBooks, history: history, currentBook: currentBook, isCookbookMode: isCookbookModeActive)
-        chatSession.appendAssistantMessage(response.content, references: response.references)
+        chatSession.appendAssistantMessage(response)
         chatSession.isGenerating = false
     }
 

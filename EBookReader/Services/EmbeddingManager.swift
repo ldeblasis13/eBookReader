@@ -31,41 +31,49 @@ actor EmbeddingManager {
         // Skip if already indexed
         guard !book.embeddingIndexed else { return }
 
-        // Extract positioned chunks
-        let positionedChunks = await textExtractor.extractPositionedChunks(from: book)
-        guard !positionedChunks.isEmpty else {
-            logger.info("No text extracted for embedding: \(book.displayTitle)")
-            return
-        }
-
-        // Store chunks with NULL embeddings first (enables resume)
-        let textChunks = positionedChunks.map { pc in
-            TextChunk(
-                bookId: book.id,
-                chunkIndex: pc.chunkIndex,
-                text: pc.text,
-                positionJSON: pc.position.toJSON(),
-                embedding: nil,
-                dateIndexed: Date()
-            )
-        }
-
+        // Resume: if chunks are already stored (vectors cleared by a migration,
+        // or a run interrupted mid-book), embed the ones still missing a
+        // vector. Keeping the rows keeps their ids, and with them the recipe
+        // hints that point at them. A full rebuild deletes chunks first.
+        let existingChunks: [TextChunk]
         do {
-            // Delete any existing chunks for this book (in case of re-index)
-            try await repo.deleteChunks(forBook: book.id)
-            try await repo.insertChunks(textChunks)
-        } catch {
-            logger.error("Failed to store chunks for \(book.displayTitle): \(error)")
-            return
-        }
-
-        // Fetch back the inserted chunks to get their IDs
-        let storedChunks: [TextChunk]
-        do {
-            storedChunks = try await repo.fetchChunks(forBook: book.id)
+            existingChunks = try await repo.fetchChunks(forBook: book.id)
         } catch {
             logger.error("Failed to fetch stored chunks: \(error)")
             return
+        }
+
+        let storedChunks: [TextChunk]
+        if !existingChunks.isEmpty {
+            storedChunks = existingChunks
+        } else {
+            // Extract positioned chunks
+            let positionedChunks = await textExtractor.extractPositionedChunks(from: book)
+            guard !positionedChunks.isEmpty else {
+                logger.info("No text extracted for embedding: \(book.displayTitle)")
+                return
+            }
+
+            // Store chunks with NULL embeddings first (enables resume)
+            let textChunks = positionedChunks.map { pc in
+                TextChunk(
+                    bookId: book.id,
+                    chunkIndex: pc.chunkIndex,
+                    text: pc.text,
+                    positionJSON: pc.position.toJSON(),
+                    embedding: nil,
+                    dateIndexed: Date()
+                )
+            }
+
+            do {
+                try await repo.insertChunks(textChunks)
+                // Fetch back the inserted chunks to get their IDs
+                storedChunks = try await repo.fetchChunks(forBook: book.id)
+            } catch {
+                logger.error("Failed to store chunks for \(book.displayTitle): \(error)")
+                return
+            }
         }
 
         // Generate embeddings in batches
