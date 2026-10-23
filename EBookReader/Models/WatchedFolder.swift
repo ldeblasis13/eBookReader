@@ -8,9 +8,9 @@ struct WatchedFolder: Identifiable, Codable, Sendable, Hashable {
     var dateAdded: Date
     var isFullImport: Bool
     /// Set for folders watched before deleted books were remembered
-    /// (ExcludedBookFile). Their first reconcile treats files that have no
-    /// book row as deleted instead of importing them; see
-    /// `BookRepository.seedExclusions(forFolder:paths:)`.
+    /// (ExcludedBookFile). Their first reconcile that reaches the whole
+    /// folder treats files that have no book row as deleted instead of
+    /// importing them; see `BookRepository.seedExclusions`.
     var needsExclusionSeed: Bool
 
     init(
