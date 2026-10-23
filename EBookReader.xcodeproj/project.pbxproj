@@ -834,7 +834,7 @@
 				);
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Vendor/llama-prebuilt/lib";
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.1.8;
+				MARKETING_VERSION = 1.1.9;
 				OTHER_LDFLAGS = (
 					"-lllama",
 					"-lggml",
@@ -872,7 +872,7 @@
 				);
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Vendor/llama-prebuilt/lib";
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.1.8;
+				MARKETING_VERSION = 1.1.9;
 				OTHER_LDFLAGS = (
 					"-lllama",
 					"-lggml",
