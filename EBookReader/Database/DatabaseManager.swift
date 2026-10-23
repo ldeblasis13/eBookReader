@@ -249,7 +249,15 @@ final class DatabaseManager: Sendable {
                 t.column("fileSize", .integer).notNull()
                 t.column("dateExcluded", .datetime).notNull()
             }
-            try db.create(index: "idx_excludedBookFile_fileSize", on: "excludedBookFile", columns: ["fileSize"])
+            // Deletions made before this version left no record. Flag the
+            // existing full-import folders so their first reconcile treats
+            // files with no row as deleted (as before: back on re-add)
+            // instead of importing them. A flag, not a walk here: a folder
+            // may be offline right now.
+            try db.alter(table: "watchedFolder") { t in
+                t.add(column: "needsExclusionSeed", .boolean).notNull().defaults(to: false)
+            }
+            try db.execute(sql: "UPDATE watchedFolder SET needsExclusionSeed = 1 WHERE isFullImport = 1")
         }
 
         return migrator

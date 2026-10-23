@@ -246,11 +246,11 @@ final class AppState {
         recipeDetector = RecipeDetector(dbPool: dbPool)
 
         startObservingDatabase()         // synchronous — @MainActor, no await needed
-        let watchedPaths = await resolveAndWatchFolders()
+        let watchedFolders = await resolveAndWatchFolders()
         // Watchers only see changes from now on. Pick up whatever changed
         // while the app was closed, in the background.
         enqueueLibraryUpdate { [weak self] in
-            await self?.reconcileWatchedFolders(watchedPaths)
+            await self?.reconcileWatchedFolders(watchedFolders)
         }
         await restoreTabs()
         await startBackgroundIndexing()
@@ -443,12 +443,9 @@ final class AppState {
             if folder.isFullImport {
                 fileWatcher.stopWatching(path: folder.path)
             }
-            // Inside another watched folder, its books would be imported
-            // again by that folder's reconcile unless remembered as deleted.
-            let insideAnotherFolder = await fullImportFolderPaths().contains {
-                $0 != folder.path && folder.path.hasPrefix($0.hasSuffix("/") ? $0 : $0 + "/")
-            }
-            try await repository.deleteBooksInFolder(folder.path, recordingExclusions: insideAnotherFolder)
+            // Spares watched folders nested inside it, and remembers the books
+            // as deleted if it sits inside another watched folder.
+            try await repository.deleteBooksInFolder(folder.path)
             try await repository.deleteWatchedFolder(id: folder.id)
         } catch {
             logger.error("Failed to remove folder: \(error)")
@@ -469,11 +466,11 @@ final class AppState {
     // MARK: - Watched Folder Startup
 
     /// Starts watching every reachable full-import folder and returns the
-    /// paths being watched, for the launch reconcile.
+    /// folders being watched, for the launch reconcile.
     @discardableResult
-    func resolveAndWatchFolders() async -> [String] {
+    func resolveAndWatchFolders() async -> [WatchedFolder] {
         let folders = (try? await repository.fetchAllWatchedFolders()) ?? []
-        var reconcilablePaths: [String] = []
+        var reconcilable: [WatchedFolder] = []
 
         for folder in folders {
             if folder.isFullImport {
@@ -513,7 +510,7 @@ final class AppState {
                 // diffing the new location against the old paths would be
                 // meaningless — leave those rows for now.
                 if folderURL.path == folder.path {
-                    reconcilablePaths.append(folder.path)
+                    reconcilable.append(folder)
                 } else {
                     logger.warning("Watched folder moved to \(folderURL.path); not reconciling \(folder.path)")
                 }
@@ -530,7 +527,7 @@ final class AppState {
                 }
             }
         }
-        return reconcilablePaths
+        return reconcilable
     }
 
     private func resolveBookBookmarks(inFolder folderPath: String) async {
@@ -640,14 +637,17 @@ final class AppState {
 
     /// Diffs the watched folders against the library, for changes made while
     /// the app wasn't running.
-    private func reconcileWatchedFolders(_ folderPaths: [String]) async {
-        for path in folderPaths {
+    private func reconcileWatchedFolders(_ folders: [WatchedFolder]) async {
+        for folder in folders {
             guard !isShuttingDown, !Task.isCancelled else { return }
-            await reconcileFolder(atPath: path)
+            await reconcileFolder(atPath: folder.path, seedingExclusionsFor: folder.needsExclusionSeed ? folder.id : nil)
         }
     }
 
-    private func reconcileFolder(atPath folderPath: String) async {
+    /// `seedingExclusionsFor`: the folder was watched before deleted books
+    /// were remembered, so files with no row are recorded as deleted rather
+    /// than imported (see `BookRepository.seedExclusions`).
+    private func reconcileFolder(atPath folderPath: String, seedingExclusionsFor seedFolderID: UUID? = nil) async {
         guard !isShuttingDown else { return }
         let plan = await BookRelocationPlanner.plan(
             reconcilingFolder: folderPath,
@@ -660,10 +660,22 @@ final class AppState {
                 \(plan.imports.count) new, \(plan.missing.count) missing
                 """)
         }
-        await apply(plan)
+        guard let seedFolderID else {
+            await apply(plan)
+            return
+        }
+        await apply(plan, importing: false)
+        do {
+            try await repository.seedExclusions(forFolder: seedFolderID, paths: plan.imports)
+            if !plan.imports.isEmpty {
+                logger.info("\(plan.imports.count) file(s) in \(folderPath) had no library entry before this version; treating them as deleted")
+            }
+        } catch {
+            logger.error("Failed to record pre-existing deletions for \(folderPath): \(error)")
+        }
     }
 
-    private func apply(_ plan: BookRelocationPlanner.Plan) async {
+    private func apply(_ plan: BookRelocationPlanner.Plan, importing: Bool = true) async {
         let applied = await BookRelocationPlanner.applyRelocations(plan, repository: repository)
         for relocation in applied {
             logger.info("Book file moved, keeping library entry: \(relocation.newPath)")
@@ -674,7 +686,9 @@ final class AppState {
         if !plan.missing.isEmpty || !plan.reappeared.isEmpty {
             fileAvailabilityRevision += 1
         }
-        await importBooks(atPaths: plan.imports)
+        if importing {
+            await importBooks(atPaths: plan.imports)
+        }
     }
 
     private func fullImportFolderPaths() async -> [String] {
@@ -699,12 +713,14 @@ final class AppState {
             guard !isShuttingDown, !Task.isCancelled else { break }
             let chunk = Array(paths[start..<min(start + 100, paths.count)])
             let known = (try? await repository.existingBookPaths(among: chunk)) ?? []
-            let excluded = (try? await repository.excludedPaths(among: chunk)) ?? []
+            let excludedSizes = (try? await repository.exclusionSizes(forPaths: chunk)) ?? [:]
             let roots = await fullImportFolderPaths().map { $0.hasSuffix("/") ? $0 : $0 + "/" }
 
             var books: [Book] = []
             for path in chunk
-            where !known.contains(path) && !excluded.contains(path) && roots.contains(where: { path.hasPrefix($0) }) {
+            where !known.contains(path)
+                && roots.contains(where: { path.hasPrefix($0) })
+                && !Self.isExcludedFile(atPath: path, excludedSize: excludedSizes[path]) {
                 guard !isShuttingDown, !Task.isCancelled else { break }
                 if let book = await Self.makeBook(
                     forFileAt: URL(fileURLWithPath: path),
@@ -730,6 +746,15 @@ final class AppState {
                 await self?.indexNewBooks()
             }
         }
+    }
+
+    /// True when the file at `path` is the one the user deleted: an
+    /// exclusion holds back only a file with the size it recorded.
+    nonisolated private static func isExcludedFile(atPath path: String, excludedSize: Int64?) -> Bool {
+        guard let excludedSize,
+              let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber
+        else { return false }
+        return size.int64Value == excludedSize
     }
 
     /// Reads a new book's metadata and caches its cover. Runs off the main

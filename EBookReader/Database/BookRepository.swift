@@ -186,87 +186,113 @@ actor BookRepository {
         }
     }
 
-    /// Deletes a book row and records its file as excluded, so reconciling
-    /// its folder with disk doesn't import it again.
+    /// Deletes a book row. If its file is still on disk, the file (path and
+    /// current size) is recorded as excluded, so reconciling its folder
+    /// doesn't import it again. A book whose file is already gone leaves
+    /// nothing behind.
     func deleteBookExcludingFile(_ book: Book) throws {
+        let exclusion = Self.exclusion(forFileAt: book.filePath)
         try dbPool.write { db in
-            try ExcludedBookFile(path: book.filePath, fileSize: book.fileSize).save(db)
+            try exclusion?.save(db)
             _ = try Book.deleteOne(db, key: book.id)
         }
     }
 
-    /// Deletes every book under `folderPath` (only that folder: /Books/SciFi
-    /// leaves /Books/SciFi-Archive and /Books/scifi alone).
+    /// Deletes the books that go with `folderPath` when it's removed: the
+    /// ones under it (only that folder: /Books/SciFi leaves
+    /// /Books/SciFi-Archive and /Books/scifi alone), except books under
+    /// another watched folder nested inside it, which stays watched.
     ///
-    /// Normally the folder's excluded files are forgotten along with it. If
-    /// the folder sits inside another watched folder, that folder's
-    /// reconcile would import the books again, so pass `recordingExclusions`
-    /// to remember them as deleted instead.
-    func deleteBooksInFolder(_ folderPath: String, recordingExclusions: Bool = false) throws {
-        let range = FolderPathRange(folderPath)
-        try dbPool.write { db in
-            if recordingExclusions {
-                try db.execute(
-                    sql: """
-                        INSERT OR REPLACE INTO excludedBookFile (path, fileSize, dateExcluded)
-                        SELECT filePath, fileSize, ? FROM book WHERE filePath >= ? AND filePath < ?
-                        """,
-                    arguments: [Date(), range.lowerBound, range.upperBound]
-                )
-            } else {
-                _ = try ExcludedBookFile.filter(range.contains(ExcludedBookFile.Columns.path)).deleteAll(db)
+    /// The removed folder's exclusions go with it — unless it sits inside
+    /// another full-import folder, whose reconcile would import the books
+    /// again. Then the ones whose files are still on disk are recorded as
+    /// excluded instead.
+    func deleteBooksInFolder(_ folderPath: String) throws {
+        let books = FolderPathRange(folderPath).removalScope(column: "book.filePath")
+        let exclusions = FolderPathRange(folderPath).removalScope(column: "excludedBookFile.path")
+
+        let insideWatchedFolder = try dbPool.read { db in
+            try Bool.fetchOne(
+                db,
+                sql: """
+                    SELECT EXISTS (SELECT 1 FROM watchedFolder
+                    WHERE isFullImport AND ? >= path || '/' AND ? < path || '0')
+                    """,
+                arguments: [folderPath, folderPath]
+            ) ?? false
+        }
+        var recorded: [ExcludedBookFile] = []
+        if insideWatchedFolder {
+            let paths = try dbPool.read { db in
+                try String.fetchAll(db, Book.select(Book.Columns.filePath).filter(sql: books.sql, arguments: books.arguments))
             }
-            _ = try Book.filter(range.contains(Book.Columns.filePath)).deleteAll(db)
+            recorded = paths.compactMap { Self.exclusion(forFileAt: $0) }
+        }
+
+        try dbPool.write { db in
+            if insideWatchedFolder {
+                for exclusion in recorded { try exclusion.save(db) }
+            } else {
+                _ = try ExcludedBookFile.filter(sql: exclusions.sql, arguments: exclusions.arguments).deleteAll(db)
+            }
+            _ = try Book.filter(sql: books.sql, arguments: books.arguments).deleteAll(db)
         }
     }
 
     // MARK: - Excluded Files
 
-    /// The subset of `paths` the user deleted from the library.
-    func excludedPaths(among paths: [String]) throws -> Set<String> {
+    /// Recorded size for each of `paths` the user deleted from the library.
+    /// An exclusion only holds back a file at that path with that size.
+    func exclusionSizes(forPaths paths: [String]) throws -> [String: Int64] {
         try dbPool.read { db in
-            var excluded = Set<String>()
+            var sizes: [String: Int64] = [:]
             for start in stride(from: 0, to: paths.count, by: 500) {
                 let chunk = paths[start..<min(start + 500, paths.count)]
-                let found = try String.fetchAll(
-                    db,
-                    ExcludedBookFile
-                        .select(ExcludedBookFile.Columns.path)
-                        .filter(chunk.contains(ExcludedBookFile.Columns.path))
-                )
-                excluded.formUnion(found)
+                for exclusion in try ExcludedBookFile.filter(chunk.contains(ExcludedBookFile.Columns.path)).fetchAll(db) {
+                    sizes[exclusion.path] = exclusion.fileSize
+                }
             }
-            return excluded
+            return sizes
         }
     }
 
-    /// Excluded files with any of the given sizes — so an excluded file that
-    /// was renamed or moved can be recognised at its new path.
-    func fetchExclusions(withFileSizes sizes: Set<Int64>) throws -> [ExcludedBookFile] {
-        let sizes = Array(sizes)
-        return try dbPool.read { db in
-            var exclusions: [ExcludedBookFile] = []
-            for start in stride(from: 0, to: sizes.count, by: 500) {
-                let chunk = sizes[start..<min(start + 500, sizes.count)]
-                exclusions += try ExcludedBookFile.filter(chunk.contains(ExcludedBookFile.Columns.fileSize)).fetchAll(db)
-            }
-            return exclusions
+    /// Paths of the exclusions anywhere under `folderPath`.
+    func exclusionPaths(inside folderPath: String) throws -> [String] {
+        try dbPool.read { db in
+            try String.fetchAll(
+                db,
+                ExcludedBookFile
+                    .select(ExcludedBookFile.Columns.path)
+                    .filter(FolderPathRange(folderPath).contains(ExcludedBookFile.Columns.path))
+            )
         }
     }
 
-    /// Points exclusions at their files' new paths.
-    func moveExclusions(_ moves: [BookRelocationPlanner.ExclusionMove]) throws {
-        guard !moves.isEmpty else { return }
+    /// A watched folder's first reconcile after upgrading (it has
+    /// `needsExclusionSeed`). Books deleted before exclusions were recorded
+    /// left no trace, so the files that reconcile would import are taken to
+    /// be deleted — as before the upgrade, they come back when the folder or
+    /// the file is added again. Records the ones still on disk and clears
+    /// the folder's flag, in one transaction.
+    func seedExclusions(forFolder folderID: UUID, paths: [String]) throws {
+        let exclusions = paths.compactMap { Self.exclusion(forFileAt: $0) }
         try dbPool.write { db in
-            for move in moves {
-                _ = try ExcludedBookFile
-                    .filter(ExcludedBookFile.Columns.path == move.oldPath)
-                    .updateAll(db, onConflict: .replace, ExcludedBookFile.Columns.path.set(to: move.newPath))
-            }
+            for exclusion in exclusions { try exclusion.save(db) }
+            _ = try WatchedFolder.filter(key: folderID).updateAll(db, WatchedFolder.Columns.needsExclusionSeed.set(to: false))
         }
     }
 
-    /// Forgets exclusions for these files: the user added them explicitly.
+    /// An exclusion for the file at `path` as it is now, if it's there.
+    private static func exclusion(forFileAt path: String) -> ExcludedBookFile? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              let size = (attributes[.size] as? NSNumber)?.int64Value
+        else { return nil }
+        return ExcludedBookFile(path: path, fileSize: size)
+    }
+
+    /// Forgets exclusions for these paths: the file is gone or replaced, a
+    /// missing book was relocated there, or the user added it explicitly.
     func clearExclusions(forPaths paths: [String]) throws {
         guard !paths.isEmpty else { return }
         try dbPool.write { db in
@@ -369,7 +395,12 @@ actor BookRepository {
                 try folder.insert(db)
                 return .added
             }
-            guard !folder.isFullImport else { return .alreadyWatched }
+            // An explicit add imports everything, so there's nothing to seed.
+            folder.needsExclusionSeed = false
+            guard !folder.isFullImport else {
+                try folder.update(db)
+                return .alreadyWatched
+            }
             folder.isFullImport = true
             folder.bookmarkData = bookmarkData
             try folder.update(db)
@@ -385,11 +416,11 @@ actor BookRepository {
         }
     }
 
+    /// Books removing `folderPath` would delete (see `deleteBooksInFolder`).
     func countBooks(inFolder folderPath: String) throws -> Int {
-        try dbPool.read { db in
-            try Book
-                .filter(FolderPathRange(folderPath).contains(Book.Columns.filePath))
-                .fetchCount(db)
+        let scope = FolderPathRange(folderPath).removalScope(column: "book.filePath")
+        return try dbPool.read { db in
+            try Book.filter(sql: scope.sql, arguments: scope.arguments).fetchCount(db)
         }
     }
 
@@ -428,5 +459,22 @@ struct FolderPathRange: Sendable {
 
     func contains(_ column: some SQLSpecificExpressible) -> SQLExpression {
         column >= lowerBound && column < upperBound
+    }
+
+    /// SQL for "`column` is inside the folder but not inside another watched
+    /// folder nested in it": what removing the folder takes with it, since a
+    /// nested watched folder stays in the library. `column` must be
+    /// table-qualified ("book.filePath"): a bare `path` would resolve to the
+    /// subquery's watchedFolder.path.
+    func removalScope(column: String) -> (sql: String, arguments: StatementArguments) {
+        (
+            sql: """
+                \(column) >= ? AND \(column) < ? AND NOT EXISTS (
+                    SELECT 1 FROM watchedFolder AS nested
+                    WHERE nested.path >= ? AND nested.path < ?
+                      AND \(column) >= nested.path || '/' AND \(column) < nested.path || '0')
+                """,
+            arguments: [lowerBound, upperBound, lowerBound, upperBound]
+        )
     }
 }

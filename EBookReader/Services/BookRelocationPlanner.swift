@@ -23,20 +23,15 @@ enum BookRelocationPlanner {
         var missing: [UUID] = []
         /// Books whose file is back at its recorded path (e.g. Put Back from the Trash).
         var reappeared: [UUID] = []
-        /// Files the user deleted from the library that were renamed or
-        /// moved: the exclusion follows the file instead of it being imported.
-        var exclusionMoves: [ExclusionMove] = []
+        /// Paths whose exclusion no longer applies: the file is gone or was
+        /// replaced by a different one, or a missing book was relocated there.
+        var forgottenExclusions: [String] = []
     }
 
     struct Relocation: Hashable, Sendable {
         let bookID: UUID
         let newPath: String
         let fileSize: Int64
-    }
-
-    struct ExclusionMove: Hashable, Sendable {
-        let oldPath: String
-        let newPath: String
     }
 
     /// A book file at a path that no book row points to.
@@ -105,6 +100,7 @@ enum BookRelocationPlanner {
         }
 
         var findings = Findings()
+        var reachable: [String: Bool] = [:]
 
         for path in orderedPaths {
             let existing = try? await repository.fetchBook(byPath: path)
@@ -123,19 +119,25 @@ enum BookRelocationPlanner {
                     format: format,
                     fileID: inode ?? fileIDsByPath[path]?.first
                 ))
-            } else if let existing {
-                findings.addMissing(existing, eventFileIDs: fileIDsByPath[path] ?? [], reportedInBatch: true)
+            } else {
+                if let existing {
+                    findings.addMissing(existing, eventFileIDs: fileIDsByPath[path] ?? [], reportedInBatch: true)
+                }
+                // Gone from a folder that's still there: an exclusion for it is stale.
+                if isLibraryFolderReachable(for: path, roots: roots, cache: &reachable, fileManager: fileManager) {
+                    findings.goneExclusionCandidates.append(path)
+                }
             }
         }
 
         let vanished = directories.filter { !isDirectory($0, fileManager: fileManager) }
-        findings.vanishedDirectories = vanished
         for directory in outermost(directories) {
             await collect(
                 subtree: directory,
                 into: &findings,
                 fromEvents: true,
                 vanishedDirectories: vanished,
+                roots: roots,
                 repository: repository,
                 fileManager: fileManager
             )
@@ -162,6 +164,7 @@ enum BookRelocationPlanner {
             into: &findings,
             fromEvents: false,
             vanishedDirectories: [],
+            roots: roots,
             repository: repository,
             fileManager: fileManager
         )
@@ -184,8 +187,9 @@ enum BookRelocationPlanner {
         private(set) var presentIDs: Set<UUID> = []
         private(set) var reappeared: [UUID] = []
         private var reappearedIDs: Set<UUID> = []
-        /// Directory events in this batch whose directory is gone.
-        var vanishedDirectories: [String] = []
+        /// Paths found gone (by an event or a walk) that may have an
+        /// exclusion, which is then stale.
+        var goneExclusionCandidates: [String] = []
 
         mutating func addAppeared(_ file: AppearedFile) {
             guard appearedPaths.insert(file.path).inserted else { return }
@@ -223,13 +227,16 @@ enum BookRelocationPlanner {
         into findings: inout Findings,
         fromEvents: Bool,
         vanishedDirectories: [String],
+        roots: [String],
         repository: BookRepository,
         fileManager: FileManager
     ) async {
         let rows = (try? await repository.fetchBookIDsByPath(under: directory)) ?? [:]
+        let exclusions = (try? await repository.exclusionPaths(inside: directory)) ?? []
 
         var onDisk = Set<String>()
-        if isDirectory(directory, fileManager: fileManager) {
+        let directoryExists = isDirectory(directory, fileManager: fileManager)
+        if directoryExists {
             let url = URL(fileURLWithPath: directory, isDirectory: true)
             FolderScanner.forEachBookFile(in: url, fileManager: fileManager) { info in
                 let path = info.url.path
@@ -241,6 +248,16 @@ enum BookRelocationPlanner {
                 } else {
                     findings.addAppeared(AppearedFile(path: path, fileSize: info.fileSize, format: info.format, fileID: nil))
                 }
+            }
+        }
+
+        // Exclusions whose file is gone. Not while the whole watched folder
+        // is unreachable (an ejected drive): those files may well be back.
+        var reachable: [String: Bool] = [:]
+        for path in exclusions where !onDisk.contains(path) && !fileManager.fileExists(atPath: path) {
+            if directoryExists
+                || isLibraryFolderReachable(for: path, roots: roots, cache: &reachable, fileManager: fileManager) {
+                findings.goneExclusionCandidates.append(path)
             }
         }
 
@@ -274,11 +291,8 @@ enum BookRelocationPlanner {
         roots: [String],
         fileManager: FileManager
     ) async -> Plan {
+        var appeared = findings.appeared
         var missing = findings.missing
-
-        // Files the user deleted from the library stay out of it.
-        let excluded = (try? await repository.excludedPaths(among: findings.appeared.map(\.path))) ?? []
-        var appeared = findings.appeared.filter { !excluded.contains($0.path) }
 
         // Books that went missing in an earlier batch, in another watched
         // folder, or while the app was closed can still be matched by size
@@ -293,36 +307,6 @@ enum BookRelocationPlanner {
                       isLibraryFolderReachable(for: book.filePath, roots: roots, cache: &reachable, fileManager: fileManager)
                 else { continue }
                 missing[book.id] = MissingBook(book: book, eventFileIDs: [], reportedInBatch: false)
-            }
-        }
-
-        // A deleted book's file that was renamed or moved (a folder rename
-        // takes its deleted books along) must stay deleted. Its exclusion
-        // takes part in matching as a stand-in book, with the same evidence
-        // rules; a file matched to one is neither imported nor adopted.
-        var exclusionPathByStandInID: [UUID: String] = [:]
-        if !appeared.isEmpty {
-            let sizes = Set(appeared.map(\.fileSize))
-            let exclusions = (try? await repository.fetchExclusions(withFileSizes: sizes)) ?? []
-            var reachable: [String: Bool] = [:]
-            for exclusion in exclusions {
-                let url = URL(fileURLWithPath: exclusion.path)
-                guard let format = FileTypeDetector.detectFormat(from: url),
-                      !fileManager.fileExists(atPath: exclusion.path),
-                      isLibraryFolderReachable(for: exclusion.path, roots: roots, cache: &reachable, fileManager: fileManager)
-                else { continue }
-                let standIn = Book(
-                    filePath: exclusion.path,
-                    fileName: url.lastPathComponent,
-                    format: format,
-                    fileSize: exclusion.fileSize
-                )
-                exclusionPathByStandInID[standIn.id] = exclusion.path
-                missing[standIn.id] = MissingBook(
-                    book: standIn,
-                    eventFileIDs: [],
-                    reportedInBatch: findings.vanishedDirectories.contains { isPath(exclusion.path, inside: $0) }
-                )
             }
         }
 
@@ -364,21 +348,36 @@ enum BookRelocationPlanner {
         let caseRenamedIDs = Set(caseRenames.map(\.bookID))
 
         var plan = Plan()
-        let matched = match(
+        plan.relocations = caseRenames + match(
             appeared: appeared.filter { !caseRenamedPaths.contains($0.path) },
             missing: missing.values.filter { !caseRenamedIDs.contains($0.book.id) }
         )
-        plan.relocations = caseRenames + matched.filter { exclusionPathByStandInID[$0.bookID] == nil }
-        plan.exclusionMoves = matched.compactMap { relocation in
-            exclusionPathByStandInID[relocation.bookID].map {
-                ExclusionMove(oldPath: $0, newPath: relocation.newPath)
-            }
-        }
-        let relocatedPaths = Set(matched.map(\.newPath)).union(caseRenamedPaths)
+        let relocatedPaths = Set(plan.relocations.map(\.newPath))
         let relocatedIDs = Set(plan.relocations.map(\.bookID))
-        plan.imports = appeared.map(\.path).filter { !relocatedPaths.contains($0) }
         plan.missing = findings.missingOrder.filter { !relocatedIDs.contains($0) }
         plan.reappeared = findings.reappeared.filter { !relocatedIDs.contains($0) }
+
+        // Exclusions only now, after matching: a missing book can always be
+        // relocated onto a deleted book's old path (the exclusion is then
+        // dropped). Of what's left to import, a file is held back only if
+        // it's the one the user deleted — same path, same size.
+        let exclusionSizes = (try? await repository.exclusionSizes(
+            forPaths: appeared.map(\.path) + findings.goneExclusionCandidates
+        )) ?? [:]
+        var forgotten = Set(findings.goneExclusionCandidates.filter { exclusionSizes[$0] != nil })
+        for file in appeared {
+            let excludedSize = exclusionSizes[file.path]
+            if relocatedPaths.contains(file.path) {
+                if excludedSize != nil { forgotten.insert(file.path) }
+            } else if excludedSize == file.fileSize {
+                continue
+            } else {
+                // A different file at that path now, if there was an exclusion.
+                if excludedSize != nil { forgotten.insert(file.path) }
+                plan.imports.append(file.path)
+            }
+        }
+        plan.forgottenExclusions = forgotten.sorted()
         return plan
     }
 
@@ -456,13 +455,13 @@ enum BookRelocationPlanner {
     // MARK: - Applying
 
     /// Points each relocated book at its new path, keeping the row and all
-    /// its user data, and moves exclusions along with their files. Returns
-    /// the relocations that were applied.
+    /// its user data, then drops the plan's stale exclusions. Returns the
+    /// relocations that were applied.
     @discardableResult
     static func applyRelocations(_ plan: Plan, repository: BookRepository) async -> [Relocation] {
-        try? await repository.moveExclusions(plan.exclusionMoves)
-        guard !plan.relocations.isEmpty else { return [] }
-        return (try? await repository.relocateBooks(plan.relocations)) ?? []
+        let applied = plan.relocations.isEmpty ? [] : ((try? await repository.relocateBooks(plan.relocations)) ?? [])
+        try? await repository.clearExclusions(forPaths: plan.forgottenExclusions)
+        return applied
     }
 
     // MARK: - Events

@@ -66,16 +66,16 @@ actor AnnotationRepository {
     /// Total annotations on the books `BookRepository.deleteBooksInFolder`
     /// would delete (same path match) — shown before removing a folder.
     func annotationCount(inFolder folderPath: String) throws -> Int {
-        let range = FolderPathRange(folderPath)
+        let scope = FolderPathRange(folderPath).removalScope(column: "book.filePath")
         return try dbPool.read { db in
             try Int.fetchOne(
                 db,
                 sql: """
                     SELECT COUNT(*) FROM annotation
                     JOIN book ON book.id = annotation.bookId
-                    WHERE book.filePath >= ? AND book.filePath < ?
+                    WHERE \(scope.sql)
                     """,
-                arguments: [range.lowerBound, range.upperBound]
+                arguments: scope.arguments
             ) ?? 0
         }
     }

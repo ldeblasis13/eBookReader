@@ -5,9 +5,11 @@ import GRDB
 ///
 /// Watched folders are reconciled with disk (at launch, on folder events,
 /// on rescans), and without this record a deleted book would simply be
-/// imported again. Its path is kept until the user explicitly adds the
-/// file or its folder again, or removes the folder. If the file is renamed
-/// or moved, the record follows it the same way a book row would.
+/// imported again. It only holds back a file at the same path with the
+/// same size, and it never stops a missing book from being relocated
+/// there. It's dropped when that path is gone (removed, renamed or moved
+/// away — a renamed deleted book may then be imported again), when the
+/// user adds the file or its folder again, or when the folder is removed.
 struct ExcludedBookFile: Codable, Sendable, Hashable {
     var path: String
     var fileSize: Int64
