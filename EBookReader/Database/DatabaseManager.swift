@@ -241,6 +241,25 @@ final class DatabaseManager: Sendable {
             try DatabaseManager.clearEmbeddingsForRebuild(db)
         }
 
+        // Book files the user deleted from the library, so reconciling a
+        // watched folder doesn't import them again.
+        migrator.registerMigration("v9_excludedBookFile") { db in
+            try db.create(table: "excludedBookFile") { t in
+                t.primaryKey("path", .text).notNull()
+                t.column("fileSize", .integer).notNull()
+                t.column("dateExcluded", .datetime).notNull()
+            }
+            // Deletions made before this version left no record. Flag the
+            // existing full-import folders so their first reconcile treats
+            // files with no row as deleted (as before: back on re-add)
+            // instead of importing them. A flag, not a walk here: a folder
+            // may be offline right now.
+            try db.alter(table: "watchedFolder") { t in
+                t.add(column: "needsExclusionSeed", .boolean).notNull().defaults(to: false)
+            }
+            try db.execute(sql: "UPDATE watchedFolder SET needsExclusionSeed = 1 WHERE isFullImport = 1")
+        }
+
         return migrator
     }
 

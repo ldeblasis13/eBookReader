@@ -81,6 +81,22 @@ final class LargeLibraryPerformanceTests: XCTestCase {
                 t.add(column: "embeddingIndexed", .boolean).notNull().defaults(to: false)
             }
         }
+        migrator.registerMigration("v9_excludedBookFile") { db in
+            try db.create(table: "excludedBookFile") { t in
+                t.primaryKey("path", .text).notNull()
+                t.column("fileSize", .integer).notNull()
+                t.column("dateExcluded", .datetime).notNull()
+            }
+            // Removing a folder spares watched folders nested in it.
+            try db.create(table: "watchedFolder") { t in
+                t.primaryKey("id", .text).notNull()
+                t.column("path", .text).notNull().unique()
+                t.column("bookmarkData", .blob).notNull()
+                t.column("dateAdded", .datetime).notNull()
+                t.column("isFullImport", .boolean).notNull().defaults(to: true)
+                t.column("needsExclusionSeed", .boolean).notNull().defaults(to: false)
+            }
+        }
         try migrator.migrate(pool)
     }
 

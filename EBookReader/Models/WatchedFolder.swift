@@ -7,19 +7,26 @@ struct WatchedFolder: Identifiable, Codable, Sendable, Hashable {
     var bookmarkData: Data
     var dateAdded: Date
     var isFullImport: Bool
+    /// Set for folders watched before deleted books were remembered
+    /// (ExcludedBookFile). Their first reconcile treats files that have no
+    /// book row as deleted instead of importing them; see
+    /// `BookRepository.seedExclusions(forFolder:paths:)`.
+    var needsExclusionSeed: Bool
 
     init(
         id: UUID = UUID(),
         path: String,
         bookmarkData: Data,
         dateAdded: Date = Date(),
-        isFullImport: Bool = true
+        isFullImport: Bool = true,
+        needsExclusionSeed: Bool = false
     ) {
         self.id = id
         self.path = path
         self.bookmarkData = bookmarkData
         self.dateAdded = dateAdded
         self.isFullImport = isFullImport
+        self.needsExclusionSeed = needsExclusionSeed
     }
 
     var displayName: String {
@@ -54,6 +61,6 @@ extension WatchedFolder: FetchableRecord, MutablePersistableRecord {
     static let databaseTableName = "watchedFolder"
 
     enum Columns: String, ColumnExpression {
-        case id, path, bookmarkData, dateAdded, isFullImport
+        case id, path, bookmarkData, dateAdded, isFullImport, needsExclusionSeed
     }
 }

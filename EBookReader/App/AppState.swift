@@ -90,6 +90,19 @@ final class AppState {
 
     var isScanning: Bool = false
     var scanProgress: Double = 0
+    /// Folder scans and imports in flight; they can overlap (a rescan waits
+    /// behind the launch reconcile), so `isScanning` follows a count.
+    private var activeScans = 0
+
+    private func beginScanning() {
+        activeScans += 1
+        isScanning = true
+    }
+
+    private func endScanning() {
+        activeScans = max(0, activeScans - 1)
+        isScanning = activeScans > 0
+    }
 
     // MARK: - Search
 
@@ -132,7 +145,6 @@ final class AppState {
     private(set) var modelInfoRepository: ModelInfoRepository!
     private(set) var chatManager: ChatManager!
     private(set) var recipeDetector: RecipeDetector!
-    let folderScanner = FolderScanner()
     let fileWatcher = FileWatcher()
     let metadataExtractor = MetadataExtractor()
     let thumbnailGenerator = ThumbnailGenerator()
@@ -234,7 +246,12 @@ final class AppState {
         recipeDetector = RecipeDetector(dbPool: dbPool)
 
         startObservingDatabase()         // synchronous — @MainActor, no await needed
-        await resolveAndWatchFolders()
+        let watchedFolders = await resolveAndWatchFolders()
+        // Watchers only see changes from now on. Pick up whatever changed
+        // while the app was closed, in the background.
+        enqueueLibraryUpdate { [weak self] in
+            await self?.reconcileWatchedFolders(watchedFolders)
+        }
         await restoreTabs()
         await startBackgroundIndexing()
 
@@ -328,19 +345,17 @@ final class AppState {
                 relativeTo: nil
             )
 
-            let alreadyWatched = try await repository.watchedFolderExists(atPath: url.path)
-            if alreadyWatched {
-                // Folder already in library — rescan to pick up any changes
-                // (new books, user-deleted books that should reappear, etc.)
+            // Also brings back any of the folder's books the user had deleted
+            // from the library: adding the folder again is asking for them.
+            switch try await repository.registerFullImportFolder(path: url.path, bookmarkData: bookmarkData) {
+            case .alreadyWatched:
                 logger.info("Folder already watched, rescanning: \(url.path)")
-                await scanFolder(url: url)
-                return
+            case .upgradedFromPartialImport:
+                logger.info("Folder had books added one by one; now importing all of it: \(url.path)")
+                fileWatcher.startWatching(path: url.path)
+            case .added:
+                fileWatcher.startWatching(path: url.path)
             }
-
-            let folder = WatchedFolder(path: url.path, bookmarkData: bookmarkData)
-            try await repository.insertWatchedFolder(folder)
-
-            fileWatcher.startWatching(path: url.path)
 
             await scanFolder(url: url)
         } catch {
@@ -356,11 +371,16 @@ final class AppState {
             filesByFolder[parentPath, default: []].append(url)
         }
 
+        // Choosing a file explicitly brings it back if it was deleted from the library.
+        try? await repository.clearExclusions(forPaths: urls.map(\.path))
+
         for (folderPath, fileURLs) in filesByFolder {
             // Check if this folder already exists as a full-import folder
             let existingFolder = try? await repository.fetchWatchedFolder(atPath: folderPath)
             if let existing = existingFolder, existing.isFullImport {
-                // Full-import folder already covers these files — nothing to do
+                // The folder's scan covers these files; import any that aren't
+                // in the library (deleted earlier, or not seen yet).
+                await importBooks(atPaths: fileURLs.map(\.path))
                 continue
             }
 
@@ -423,6 +443,8 @@ final class AppState {
             if folder.isFullImport {
                 fileWatcher.stopWatching(path: folder.path)
             }
+            // Spares watched folders nested inside it, and remembers the books
+            // as deleted if it sits inside another watched folder.
             try await repository.deleteBooksInFolder(folder.path)
             try await repository.deleteWatchedFolder(id: folder.id)
         } catch {
@@ -430,65 +452,25 @@ final class AppState {
         }
     }
 
+    /// Brings the library in line with a folder's contents. A file that a
+    /// missing book was moved or renamed to keeps that book's row (and its
+    /// annotations); only files that match no book are imported.
     func scanFolder(url: URL) async {
-        isScanning = true
-
-        var buffer: [Book] = []
-        buffer.reserveCapacity(100)
-
-        for await info in await folderScanner.scan(folderURL: url) {
-            let exists = (try? await repository.bookExists(atPath: info.url.path)) ?? false
-            if exists { continue }
-
-            let metadata = await metadataExtractor.extractMetadata(
-                from: info.url,
-                format: info.format
-            )
-
-            // Save cover to disk cache (not in the DB) and record the flag.
-            let bookId = UUID()
-            var hasCachedThumbnail = false
-            if let coverData = metadata.coverImageData {
-                hasCachedThumbnail = await thumbnailGenerator.saveCoverData(coverData, for: bookId)
-            }
-
-            let book = Book(
-                id: bookId,
-                filePath: info.url.path,
-                fileName: info.fileName,
-                title: metadata.title,
-                author: metadata.author,
-                format: info.format,
-                fileSize: info.fileSize,
-                pageCount: metadata.pageCount,
-                language: metadata.language,
-                publisher: metadata.publisher,
-                isbn: metadata.isbn,
-                bookDescription: metadata.description,
-                hasCachedThumbnail: hasCachedThumbnail
-            )
-            buffer.append(book)
-
-            if buffer.count >= 100 {
-                try? await repository.insertBooks(buffer)
-                buffer.removeAll(keepingCapacity: true)
-            }
-        }
-
-        if !buffer.isEmpty {
-            try? await repository.insertBooks(buffer)
-        }
-
-        isScanning = false
-
-        // Index newly scanned books
-        await indexNewBooks()
+        beginScanning()
+        await enqueueLibraryUpdate { [weak self] in
+            await self?.reconcileFolder(atPath: url.path)
+        }.value
+        endScanning()
     }
 
     // MARK: - Watched Folder Startup
 
-    func resolveAndWatchFolders() async {
+    /// Starts watching every reachable full-import folder and returns the
+    /// folders being watched, for the launch reconcile.
+    @discardableResult
+    func resolveAndWatchFolders() async -> [WatchedFolder] {
         let folders = (try? await repository.fetchAllWatchedFolders()) ?? []
+        var reconcilable: [WatchedFolder] = []
 
         for folder in folders {
             if folder.isFullImport {
@@ -522,6 +504,16 @@ final class AppState {
                 }
 
                 fileWatcher.startWatching(path: folderURL.path)
+
+                // Books are stored under folder.path. If the bookmark now
+                // resolves somewhere else the folder itself moved, and
+                // diffing the new location against the old paths would be
+                // meaningless — leave those rows for now.
+                if folderURL.path == folder.path {
+                    reconcilable.append(folder)
+                } else {
+                    logger.warning("Watched folder moved to \(folderURL.path); not reconciling \(folder.path)")
+                }
             } else {
                 // Partial-import: resolve individual book bookmarks (optional with no sandbox)
                 await resolveBookBookmarks(inFolder: folder.path)
@@ -530,9 +522,12 @@ final class AppState {
 
         fileWatcher.setChangeHandler { [weak self] events in
             Task { @MainActor [weak self] in
-                await self?.handleFileChanges(events)
+                self?.enqueueLibraryUpdate { [weak self] in
+                    await self?.handleFileChanges(events)
+                }
             }
         }
+        return reconcilable
     }
 
     private func resolveBookBookmarks(inFolder folderPath: String) async {
@@ -608,13 +603,79 @@ final class AppState {
         return book.isAvailable
     }
 
+    // MARK: - Reconciling With Disk
+
+    /// The tail of the queue of disk-driven library updates: file-watcher
+    /// batches, the launch reconcile and folder rescans run one at a time,
+    /// in order, so each plan sees the previous one's relocations and imports.
+    private var libraryUpdateTail: Task<Void, Never>?
+
+    @discardableResult
+    private func enqueueLibraryUpdate(_ work: @escaping @MainActor () async -> Void) -> Task<Void, Never> {
+        let previous = libraryUpdateTail
+        let task = Task { @MainActor in
+            await previous?.value
+            await work()
+        }
+        libraryUpdateTail = task
+        return task
+    }
+
     /// Book rows are keyed by UUID, not path, and annotations, collections,
     /// reading position and embeddings cascade from them — so this never
-    /// deletes. Renamed/moved files keep their row with an updated path;
-    /// files that vanish stay in the library, flagged as missing.
+    /// deletes. Renamed/moved files and folders keep their rows with updated
+    /// paths; files that vanish stay in the library, flagged as missing.
     private func handleFileChanges(_ events: [FileEvent]) async {
-        let plan = await BookRelocationPlanner.plan(for: events, repository: repository)
+        guard !isShuttingDown else { return }
+        let plan = await BookRelocationPlanner.plan(
+            for: events,
+            repository: repository,
+            watchedRoots: await fullImportFolderPaths()
+        )
+        await apply(plan)
+    }
 
+    /// Diffs the watched folders against the library, for changes made while
+    /// the app wasn't running.
+    private func reconcileWatchedFolders(_ folders: [WatchedFolder]) async {
+        for folder in folders {
+            guard !isShuttingDown, !Task.isCancelled else { return }
+            await reconcileFolder(atPath: folder.path, seedingExclusionsFor: folder.needsExclusionSeed ? folder.id : nil)
+        }
+    }
+
+    /// `seedingExclusionsFor`: the folder was watched before deleted books
+    /// were remembered, so files with no row are recorded as deleted rather
+    /// than imported (see `BookRepository.seedExclusions`).
+    private func reconcileFolder(atPath folderPath: String, seedingExclusionsFor seedFolderID: UUID? = nil) async {
+        guard !isShuttingDown else { return }
+        let plan = await BookRelocationPlanner.plan(
+            reconcilingFolder: folderPath,
+            repository: repository,
+            watchedRoots: await fullImportFolderPaths()
+        )
+        if plan != BookRelocationPlanner.Plan() {
+            logger.info("""
+                Reconciled \(folderPath): \(plan.relocations.count) moved, \
+                \(plan.imports.count) new, \(plan.missing.count) missing
+                """)
+        }
+        guard let seedFolderID else {
+            await apply(plan)
+            return
+        }
+        await apply(plan, importing: false)
+        do {
+            try await repository.seedExclusions(forFolder: seedFolderID, paths: plan.imports)
+            if !plan.imports.isEmpty {
+                logger.info("\(plan.imports.count) file(s) in \(folderPath) had no library entry before this version; treating them as deleted")
+            }
+        } catch {
+            logger.error("Failed to record pre-existing deletions for \(folderPath): \(error)")
+        }
+    }
+
+    private func apply(_ plan: BookRelocationPlanner.Plan, importing: Bool = true) async {
         let applied = await BookRelocationPlanner.applyRelocations(plan, repository: repository)
         for relocation in applied {
             logger.info("Book file moved, keeping library entry: \(relocation.newPath)")
@@ -625,49 +686,129 @@ final class AppState {
         if !plan.missing.isEmpty || !plan.reappeared.isEmpty {
             fileAvailabilityRevision += 1
         }
-
-        for path in plan.imports {
-            await importSingleBook(url: URL(fileURLWithPath: path))
+        if importing {
+            await importBooks(atPaths: plan.imports)
         }
     }
 
-    private func importSingleBook(url: URL) async {
-        guard let format = FileTypeDetector.detectFormat(from: url) else { return }
-        let resourceValues = try? url.resourceValues(forKeys: [.fileSizeKey])
-        let fileSize = Int64(resourceValues?.fileSize ?? 0)
+    private func fullImportFolderPaths() async -> [String] {
+        let folders = (try? await repository.fetchAllWatchedFolders()) ?? []
+        return folders.filter(\.isFullImport).map(\.path)
+    }
+
+    /// Imports the book files at `paths` as new books, 100 per write.
+    /// Skips paths that already have a row, files the user deleted from the
+    /// library, files that are gone by now, and files outside every watched
+    /// folder (the folder was removed meanwhile). Indexing the new books
+    /// runs afterwards on its own task, so callers on the library-update
+    /// queue don't hold it for a whole FTS pass.
+    private func importBooks(atPaths paths: [String]) async {
+        guard !paths.isEmpty else { return }
+        beginScanning()
+
+        let metadataExtractor = metadataExtractor
+        let thumbnailGenerator = thumbnailGenerator
+        var importedAny = false
+        for start in stride(from: 0, to: paths.count, by: 100) {
+            guard !isShuttingDown, !Task.isCancelled else { break }
+            let chunk = Array(paths[start..<min(start + 100, paths.count)])
+            let known = (try? await repository.existingBookPaths(among: chunk)) ?? []
+            let excludedSizes = (try? await repository.exclusionSizes(forPaths: chunk)) ?? [:]
+            let roots = await fullImportFolderPaths().map { $0.hasSuffix("/") ? $0 : $0 + "/" }
+
+            var books: [Book] = []
+            for path in chunk
+            where !known.contains(path)
+                && roots.contains(where: { path.hasPrefix($0) })
+                && !Self.isExcludedFile(atPath: path, excludedSize: excludedSizes[path]) {
+                guard !isShuttingDown, !Task.isCancelled else { break }
+                if let book = await Self.makeBook(
+                    forFileAt: URL(fileURLWithPath: path),
+                    metadataExtractor: metadataExtractor,
+                    thumbnailGenerator: thumbnailGenerator
+                ) {
+                    books.append(book)
+                }
+            }
+            guard !books.isEmpty else { continue }
+            do {
+                try await repository.insertBooks(books)
+                importedAny = true
+            } catch {
+                logger.error("Failed to save \(books.count) imported book(s): \(error)")
+            }
+        }
+
+        endScanning()
+        if importedAny {
+            // Coalesces with a pass already running (indexingRequested).
+            runTracked { [weak self] in
+                await self?.indexNewBooks()
+            }
+        }
+    }
+
+    /// True when the file at `path` is the one the user deleted: an
+    /// exclusion holds back only a file with the size it recorded.
+    nonisolated private static func isExcludedFile(atPath path: String, excludedSize: Int64?) -> Bool {
+        guard let excludedSize,
+              let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber
+        else { return false }
+        return size.int64Value == excludedSize
+    }
+
+    /// Reads a new book's metadata and caches its cover. Runs off the main
+    /// actor; nil if the file is gone or isn't a supported book.
+    nonisolated private static func makeBook(
+        forFileAt url: URL,
+        metadataExtractor: MetadataExtractor,
+        thumbnailGenerator: ThumbnailGenerator
+    ) async -> Book? {
+        guard let format = FileTypeDetector.detectFormat(from: url),
+              let fileSize = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        else { return nil }
         let metadata = await metadataExtractor.extractMetadata(from: url, format: format)
 
+        // Save cover to disk cache (not in the DB) and record the flag.
         let bookId = UUID()
         var hasCachedThumbnail = false
         if let coverData = metadata.coverImageData {
             hasCachedThumbnail = await thumbnailGenerator.saveCoverData(coverData, for: bookId)
         }
 
-        let book = Book(
+        return Book(
             id: bookId,
             filePath: url.path,
             fileName: url.lastPathComponent,
             title: metadata.title,
             author: metadata.author,
             format: format,
-            fileSize: fileSize,
+            fileSize: Int64(fileSize),
             pageCount: metadata.pageCount,
+            language: metadata.language,
+            publisher: metadata.publisher,
+            isbn: metadata.isbn,
+            bookDescription: metadata.description,
             hasCachedThumbnail: hasCachedThumbnail
         )
-        _ = try? await repository.insertBook(book)
-
-        // Index the new book
-        await indexNewBooks()
     }
+
+    /// Set when books may need indexing while a pass is already running, so
+    /// that pass goes round again instead of missing them.
+    private var indexingRequested = false
 
     /// Incrementally index any books not yet indexed (called after imports).
     private func indexNewBooks() async {
+        indexingRequested = true
         guard !isIndexing else { return }
         let dbPool = repository.dbPool
         isIndexing = true
-        await ftsManager.indexUnindexedBooks(from: dbPool) { [weak self] done, total in
-            Task { @MainActor [weak self] in
-                self?.indexingProgress = (done, total)
+        while indexingRequested, !isShuttingDown {
+            indexingRequested = false
+            await ftsManager.indexUnindexedBooks(from: dbPool) { [weak self] done, total in
+                Task { @MainActor [weak self] in
+                    self?.indexingProgress = (done, total)
+                }
             }
         }
         isIndexing = false
@@ -884,8 +1025,10 @@ final class AppState {
         // Remove embedding chunks
         await embeddingManager.removeIndex(for: book.id)
 
-        // Remove from database (cascades to bookCollection, annotation, textChunk)
-        try? await repository.deleteBook(id: book.id)
+        // Remove from database (cascades to bookCollection, annotation, textChunk).
+        // The file is remembered as excluded, so reconciling its folder with
+        // disk doesn't import it again; adding it or its folder explicitly does.
+        try? await repository.deleteBookExcludingFile(book)
 
         // Remove thumbnail cache
         let thumbPath = Constants.Directories.thumbnailCache
@@ -1435,6 +1578,7 @@ final class AppState {
         preloadTask?.cancel()
         embeddingTask?.cancel()
         for task in trackedTasks.values { task.cancel() }
+        libraryUpdateTail?.cancel()
         backgroundStartupTask = nil
         preloadTask = nil
         embeddingTask = nil
