@@ -640,34 +640,48 @@ final class AppState {
     private func reconcileWatchedFolders(_ folders: [WatchedFolder]) async {
         for folder in folders {
             guard !isShuttingDown, !Task.isCancelled else { return }
-            await reconcileFolder(atPath: folder.path, seedingExclusionsFor: folder.needsExclusionSeed ? folder.id : nil)
+            await reconcileFolder(atPath: folder.path, seedingExclusions: true)
         }
     }
 
-    /// `seedingExclusionsFor`: the folder was watched before deleted books
-    /// were remembered, so files with no row are recorded as deleted rather
-    /// than imported (see `BookRepository.seedExclusions`).
-    private func reconcileFolder(atPath folderPath: String, seedingExclusionsFor seedFolderID: UUID? = nil) async {
+    /// `seedingExclusions`: if the folder was watched before deleted books
+    /// were remembered (`needsExclusionSeed`), files with no row are recorded
+    /// as deleted rather than imported (see `BookRepository.seedExclusions`).
+    /// The flag is read now, not from the launch snapshot: Add Folder clears it.
+    private func reconcileFolder(atPath folderPath: String, seedingExclusions: Bool = false) async {
         guard !isShuttingDown else { return }
         let plan = await BookRelocationPlanner.plan(
             reconcilingFolder: folderPath,
             repository: repository,
             watchedRoots: await fullImportFolderPaths()
         )
-        if plan != BookRelocationPlanner.Plan() {
+        if !plan.relocations.isEmpty || !plan.imports.isEmpty || !plan.missing.isEmpty {
             logger.info("""
                 Reconciled \(folderPath): \(plan.relocations.count) moved, \
                 \(plan.imports.count) new, \(plan.missing.count) missing
                 """)
         }
-        guard let seedFolderID else {
+        if !plan.isComplete {
+            logger.warning("Couldn't reach all of \(folderPath) (drive ejected?); left the rest of it as it was")
+        }
+        guard seedingExclusions,
+              let folder = try? await repository.fetchWatchedFolder(atPath: folderPath),
+              folder.needsExclusionSeed
+        else {
             await apply(plan)
             return
         }
         await apply(plan, importing: false)
         do {
-            try await repository.seedExclusions(forFolder: seedFolderID, paths: plan.imports)
-            if !plan.imports.isEmpty {
+            let seeded = try await repository.seedExclusions(
+                forFolder: folder.id,
+                paths: plan.imports,
+                walkedWholeFolder: plan.isComplete
+            )
+            if !seeded {
+                // Added again meanwhile: import everything after all.
+                await importBooks(atPaths: plan.imports)
+            } else if !plan.imports.isEmpty {
                 logger.info("\(plan.imports.count) file(s) in \(folderPath) had no library entry before this version; treating them as deleted")
             }
         } catch {
@@ -1028,7 +1042,7 @@ final class AppState {
         // Remove from database (cascades to bookCollection, annotation, textChunk).
         // The file is remembered as excluded, so reconciling its folder with
         // disk doesn't import it again; adding it or its folder explicitly does.
-        try? await repository.deleteBookExcludingFile(book)
+        try? await repository.deleteBookExcludingFile(id: book.id)
 
         // Remove thumbnail cache
         let thumbPath = Constants.Directories.thumbnailCache

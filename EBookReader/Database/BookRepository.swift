@@ -186,15 +186,22 @@ actor BookRepository {
         }
     }
 
-    /// Deletes a book row. If its file is still on disk, the file (path and
-    /// current size) is recorded as excluded, so reconciling its folder
-    /// doesn't import it again. A book whose file is already gone leaves
-    /// nothing behind.
-    func deleteBookExcludingFile(_ book: Book) throws {
-        let exclusion = Self.exclusion(forFileAt: book.filePath)
+    /// Deletes a book row and records its file as excluded, so reconciling
+    /// its folder doesn't import it again (see `exclusion(forDeleting:)`).
+    /// The row is read here, not taken from the caller, whose copy may
+    /// predate a relocation; nothing is recorded unless the row was deleted.
+    func deleteBookExcludingFile(id: UUID) throws {
+        guard let book = try fetchBook(id: id) else { return }
+        var spellings: [String: String] = [:]
+        let exclusion = try Self.exclusion(
+            forDeleting: book.filePath,
+            recordedSize: book.fileSize,
+            watchedRoot: fullImportFolderPath(containing: book.filePath),
+            directorySpellings: &spellings
+        )
         try dbPool.write { db in
+            guard try Book.deleteOne(db, key: id) else { return }
             try exclusion?.save(db)
-            _ = try Book.deleteOne(db, key: book.id)
         }
     }
 
@@ -205,28 +212,31 @@ actor BookRepository {
     ///
     /// The removed folder's exclusions go with it — unless it sits inside
     /// another full-import folder, whose reconcile would import the books
-    /// again. Then the ones whose files are still on disk are recorded as
-    /// excluded instead.
+    /// again. Then they're recorded as excluded instead, as for Delete from
+    /// Library.
     func deleteBooksInFolder(_ folderPath: String) throws {
         let books = FolderPathRange(folderPath).removalScope(column: "book.filePath")
         let exclusions = FolderPathRange(folderPath).removalScope(column: "excludedBookFile.path")
 
-        let insideWatchedFolder = try dbPool.read { db in
-            try Bool.fetchOne(
-                db,
-                sql: """
-                    SELECT EXISTS (SELECT 1 FROM watchedFolder
-                    WHERE isFullImport AND ? >= path || '/' AND ? < path || '0')
-                    """,
-                arguments: [folderPath, folderPath]
-            ) ?? false
-        }
+        let outerRoot = try fullImportFolderPath(containing: folderPath)
+        let insideWatchedFolder = outerRoot != nil
         var recorded: [ExcludedBookFile] = []
         if insideWatchedFolder {
-            let paths = try dbPool.read { db in
-                try String.fetchAll(db, Book.select(Book.Columns.filePath).filter(sql: books.sql, arguments: books.arguments))
+            let rows = try dbPool.read { db in
+                try Row.fetchAll(
+                    db,
+                    Book.select(Book.Columns.filePath, Book.Columns.fileSize).filter(sql: books.sql, arguments: books.arguments)
+                )
             }
-            recorded = paths.compactMap { Self.exclusion(forFileAt: $0) }
+            var spellings: [String: String] = [:]
+            recorded = rows.compactMap { row in
+                Self.exclusion(
+                    forDeleting: row[Book.Columns.filePath],
+                    recordedSize: row[Book.Columns.fileSize],
+                    watchedRoot: outerRoot,
+                    directorySpellings: &spellings
+                )
+            }
         }
 
         try dbPool.write { db in
@@ -272,13 +282,24 @@ actor BookRepository {
     /// `needsExclusionSeed`). Books deleted before exclusions were recorded
     /// left no trace, so the files that reconcile would import are taken to
     /// be deleted — as before the upgrade, they come back when the folder or
-    /// the file is added again. Records the ones still on disk and clears
-    /// the folder's flag, in one transaction.
-    func seedExclusions(forFolder folderID: UUID, paths: [String]) throws {
+    /// the file is added again. Records the ones still on disk and, if the
+    /// walk saw the whole folder, clears the flag, in one transaction; after
+    /// a walk that couldn't reach it all (an ejected drive) the next
+    /// reconcile seeds again.
+    ///
+    /// The flag is checked in that transaction too: Add Folder may have
+    /// cleared it while the reconcile ran. Then nothing is recorded and this
+    /// returns false — the caller should import `paths` instead.
+    @discardableResult
+    func seedExclusions(forFolder folderID: UUID, paths: [String], walkedWholeFolder: Bool) throws -> Bool {
         let exclusions = paths.compactMap { Self.exclusion(forFileAt: $0) }
-        try dbPool.write { db in
+        return try dbPool.write { db in
+            guard try WatchedFolder.fetchOne(db, key: folderID)?.needsExclusionSeed == true else { return false }
             for exclusion in exclusions { try exclusion.save(db) }
-            _ = try WatchedFolder.filter(key: folderID).updateAll(db, WatchedFolder.Columns.needsExclusionSeed.set(to: false))
+            if walkedWholeFolder {
+                _ = try WatchedFolder.filter(key: folderID).updateAll(db, WatchedFolder.Columns.needsExclusionSeed.set(to: false))
+            }
+            return true
         }
     }
 
@@ -289,6 +310,68 @@ actor BookRepository {
               let size = (attributes[.size] as? NSNumber)?.int64Value
         else { return nil }
         return ExcludedBookFile(path: path, fileSize: size)
+    }
+
+    /// What to record for a book file the user deletes from the library:
+    /// - still on disk: its current size, at the path a folder walk reports
+    ///   (see `onDiskSpelling`);
+    /// - gone while its watched folder can't be reached (an ejected drive):
+    ///   the size recorded for the row, or the book would come back with the
+    ///   drive;
+    /// - gone from a watched folder that's there, or outside every one:
+    ///   nothing — no reconcile would bring it back.
+    private static func exclusion(
+        forDeleting path: String,
+        recordedSize: Int64,
+        watchedRoot: String?,
+        directorySpellings: inout [String: String]
+    ) -> ExcludedBookFile? {
+        if let onDisk = exclusion(forFileAt: path) {
+            return ExcludedBookFile(
+                path: onDiskSpelling(of: path, below: watchedRoot, directories: &directorySpellings),
+                fileSize: onDisk.fileSize
+            )
+        }
+        guard let watchedRoot, !FileManager.default.fileExists(atPath: watchedRoot) else { return nil }
+        return ExcludedBookFile(path: path, fileSize: recordedSize)
+    }
+
+    /// `path` as the file system spells it below `root`. On a
+    /// case-insensitive volume a row can still say "sci-fi/dune.epub" for a
+    /// file renamed "Sci-Fi/Dune.epub" that no reconcile has caught up with
+    /// yet; walks report the new spelling. The root's own spelling is kept,
+    /// since every path under it starts with it. `directories` caches
+    /// directory spellings across calls.
+    private static func onDiskSpelling(of path: String, below root: String?, directories: inout [String: String]) -> String {
+        let name = (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.nameKey]).name)
+            ?? (path as NSString).lastPathComponent
+        let parent = (path as NSString).deletingLastPathComponent
+        guard let root, parent != root, parent.hasPrefix(root.hasSuffix("/") ? root : root + "/") else {
+            return (parent as NSString).appendingPathComponent(name)
+        }
+        let directory: String
+        if let known = directories[parent] {
+            directory = known
+        } else {
+            directory = onDiskSpelling(of: parent, below: root, directories: &directories)
+            directories[parent] = directory
+        }
+        return (directory as NSString).appendingPathComponent(name)
+    }
+
+    /// The innermost full-import watched folder that `path` is inside.
+    private func fullImportFolderPath(containing path: String) throws -> String? {
+        try dbPool.read { db in
+            try String.fetchOne(
+                db,
+                sql: """
+                    SELECT path FROM watchedFolder
+                    WHERE isFullImport AND ? >= path || '/' AND ? < path || '0'
+                    ORDER BY length(path) DESC LIMIT 1
+                    """,
+                arguments: [path, path]
+            )
+        }
     }
 
     /// Forgets exclusions for these paths: the file is gone or replaced, a

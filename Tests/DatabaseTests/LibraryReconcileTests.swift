@@ -612,7 +612,7 @@ final class LibraryReconcileTests: XCTestCase {
     func testDeletedBookIsNotImportedAgain() async throws {
         let dune = try writeFile("Sci-Fi/Dune.epub", bytes: 5_300)
         let book = try await insertBookWithUserData(at: dune)
-        try await bookRepo.deleteBookExcludingFile(book)
+        try await bookRepo.deleteBookExcludingFile(id: book.id)
 
         let atLaunch = await reconcile()
         XCTAssertEqual(atLaunch.imports, [], "Delete from Library must survive the launch reconcile")
@@ -639,7 +639,7 @@ final class LibraryReconcileTests: XCTestCase {
         // Delete Sci-Fi/Dune.epub from the library, then move the annotated
         // Inbox/Dune.epub over it. The exclusion must not stop the relocation.
         let deletedFile = try writeFile("Sci-Fi/Dune.epub", bytes: 7_000)
-        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: deletedFile))
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: deletedFile).id)
         let inbox = try writeFile("Inbox/Dune.epub", bytes: 7_100, seed: 2)
         let book = try await insertBookWithUserData(at: inbox)
 
@@ -664,7 +664,7 @@ final class LibraryReconcileTests: XCTestCase {
         // Same, while the app was closed, and the moved file is byte-identical
         // to the deleted one: matching still comes first.
         let deletedFile = try writeFile("Sci-Fi/Dune.epub", bytes: 7_200)
-        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: deletedFile))
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: deletedFile).id)
         let inbox = try writeFile("Inbox/Dune.epub", bytes: 7_200)
         let book = try await insertBookWithUserData(at: inbox)
         XCTAssertEqual(rename(inbox.path, deletedFile.path), 0)
@@ -686,7 +686,7 @@ final class LibraryReconcileTests: XCTestCase {
         let book = try await insertBookWithUserData(at: original)
         let duplicateBook = try await insertBook(at: duplicate)
         try FileManager.default.removeItem(at: duplicate)
-        try await bookRepo.deleteBookExcludingFile(duplicateBook)
+        try await bookRepo.deleteBookExcludingFile(id: duplicateBook.id)
         let recorded = try await bookRepo.exclusionSizes(forPaths: [duplicate.path])
         XCTAssertEqual(recorded, [:], "deleting a book whose file is gone records nothing")
 
@@ -699,9 +699,89 @@ final class LibraryReconcileTests: XCTestCase {
         try await assertUserDataIntact(for: book, nowAt: moved)
     }
 
+    func testDeletedDuplicateOnDiskDoesNotBlockARenameWhileClosed() async throws {
+        // A duplicate deleted from the library stays next to the annotated
+        // original, which is then renamed while the app is closed. Both are
+        // the same size in the same folder; only the original is a candidate.
+        let original = try writeFile("Herbert/Dune.epub", bytes: 9_000)
+        let book = try await insertBookWithUserData(at: original)
+        let duplicate = try writeFile("Herbert/Dune copy.epub", bytes: 9_000)
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: duplicate).id)
+        let renamed = try move(original, to: url("Herbert/Dune (1965).epub"))
+
+        let result = await reconcile()
+
+        XCTAssertEqual(result.relocations, [.init(bookID: book.id, newPath: renamed.path, fileSize: 9_000)])
+        XCTAssertEqual(result.imports, [], "neither the renamed original nor the deleted copy is imported")
+        XCTAssertEqual(result.missing, [])
+        XCTAssertEqual(result.forgottenExclusions, [])
+        await BookRelocationPlanner.applyRelocations(result, repository: bookRepo)
+        try await assertUserDataIntact(for: book, nowAt: renamed)
+    }
+
+    func testDeletedDuplicateOnDiskDoesNotBlockAMoveWhileClosed() async throws {
+        // Same name and size in another folder: the deleted copy and the
+        // moved original both look moved.
+        let original = try writeFile("Unsorted/Dune.epub", bytes: 9_010)
+        let book = try await insertBookWithUserData(at: original)
+        let duplicate = try writeFile("Downloads/Dune.epub", bytes: 9_010)
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: duplicate).id)
+        let moved = try move(original, to: url("Sci-Fi/Dune.epub"))
+
+        let result = await reconcile()
+
+        XCTAssertEqual(result.relocations, [.init(bookID: book.id, newPath: moved.path, fileSize: 9_010)])
+        XCTAssertEqual(result.imports, [])
+        XCTAssertEqual(result.missing, [])
+        XCTAssertEqual(result.forgottenExclusions, [])
+        await BookRelocationPlanner.applyRelocations(result, repository: bookRepo)
+        try await assertUserDataIntact(for: book, nowAt: moved)
+    }
+
+    func testDeletedDuplicateOnDiskDoesNotTakeARenamedBooksAnnotations() async throws {
+        // The deleted copy kept the book's name, so by name it's the stronger
+        // match: the book used to be moved onto the copy the user deleted
+        // (undoing that deletion) and the renamed original imported as new.
+        let original = try writeFile("Herbert/Dune.epub", bytes: 9_020)
+        let book = try await insertBookWithUserData(at: original)
+        let duplicate = try writeFile("Old Downloads/Dune.epub", bytes: 9_020)
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: duplicate).id)
+        let renamed = try move(original, to: url("Herbert/Dune (1965).epub"))
+
+        let result = await reconcile()
+
+        XCTAssertEqual(result.relocations, [.init(bookID: book.id, newPath: renamed.path, fileSize: 9_020)])
+        XCTAssertEqual(result.imports, [])
+        XCTAssertEqual(result.forgottenExclusions, [], "the deletion stands")
+        await BookRelocationPlanner.applyRelocations(result, repository: bookRepo)
+        try await assertUserDataIntact(for: book, nowAt: renamed)
+        let excluded = try await bookRepo.exclusionSizes(forPaths: [duplicate.path])
+        XCTAssertEqual(excluded, [duplicate.path: 9_020])
+    }
+
+    func testDeletedDuplicateIsNotChosenForAnAmbiguousBook() async throws {
+        // Two real candidates the book can't be told apart between: it stays
+        // missing and both are imported, rather than it landing on the copy
+        // the user deleted just because that one has no rival among the excluded.
+        let original = try writeFile("Unsorted/Dune.epub", bytes: 9_030)
+        let book = try await insertBookWithUserData(at: original)
+        let duplicate = try writeFile("Downloads/Dune.epub", bytes: 9_030)
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: duplicate).id)
+        let copyA = try writeFile("Sci-Fi/Dune.epub", bytes: 9_030)
+        let copyB = try writeFile("Favourites/Dune.epub", bytes: 9_030)
+        try FileManager.default.removeItem(at: original)
+
+        let result = await reconcile()
+
+        XCTAssertEqual(result.relocations, [])
+        XCTAssertEqual(Set(result.imports), [copyA.path, copyB.path])
+        XCTAssertEqual(result.missing, [book.id])
+        XCTAssertEqual(result.forgottenExclusions, [])
+    }
+
     func testExclusionIsDroppedWhenItsFileIsGoneSoARedownloadImports() async throws {
         let dune = try writeFile("Dune.epub", bytes: 7_400)
-        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: dune))
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: dune).id)
         try FileManager.default.removeItem(at: dune)
 
         let walk = await reconcile()
@@ -718,7 +798,7 @@ final class LibraryReconcileTests: XCTestCase {
 
     func testRemovedEventDropsTheExclusion() async throws {
         let dune = try writeFile("Sci-Fi/Dune.epub", bytes: 7_500)
-        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: dune))
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: dune).id)
         try FileManager.default.removeItem(at: dune)
 
         let fileRemoved = await plan([FileEvent(
@@ -729,7 +809,7 @@ final class LibraryReconcileTests: XCTestCase {
 
         // A folder that vanishes takes its exclusions with it too.
         let other = try writeFile("Old/Foundation.epub", bytes: 7_600)
-        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: other))
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: other).id)
         try move(url("Old"), to: tempDir.appendingPathComponent("Trash/Old"))
         let folderRemoved = await plan([folderEvent(url("Old"))])
         XCTAssertEqual(folderRemoved.forgottenExclusions, [other.path])
@@ -739,7 +819,7 @@ final class LibraryReconcileTests: XCTestCase {
         // An ejected drive: everything looks gone, but nothing was deleted.
         let ejected = tempDir.appendingPathComponent("Volumes/Drive/Books", isDirectory: true)
         let dune = try writeFile("Dune.epub", bytes: 7_700, in: ejected)
-        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: dune))
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: dune).id)
         try FileManager.default.removeItem(at: tempDir.appendingPathComponent("Volumes/Drive"))
 
         let result = await plan(
@@ -751,7 +831,7 @@ final class LibraryReconcileTests: XCTestCase {
 
     func testADifferentFileAtADeletedPathIsImported() async throws {
         let dune = try writeFile("Dune.epub", bytes: 7_800)
-        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: dune))
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: dune).id)
         try writeFile("Dune.epub", bytes: 7_900, seed: 4)
 
         let result = await reconcile()
@@ -760,10 +840,139 @@ final class LibraryReconcileTests: XCTestCase {
         XCTAssertEqual(result.forgottenExclusions, [dune.path])
     }
 
+    func testDriveEjectedDuringTheWalkKeepsExclusionsAndRowsItDidNotReach() async throws {
+        let kept = try writeFile("Sci-Fi/Foundation.epub", bytes: 9_200)
+        try await insertBook(at: kept)
+        let deleted = try writeFile("Sci-Fi/Dune.epub", bytes: 9_210)
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: deleted).id)
+
+        // The folder is there when the planner checks, then the drive goes.
+        let fileManager = EjectingFileManager(ejecting: libraryDir, to: tempDir.appendingPathComponent("Parked"))
+        let result = await BookRelocationPlanner.plan(
+            reconcilingFolder: libraryDir.path,
+            repository: bookRepo,
+            watchedRoots: [libraryDir.path],
+            fileManager: fileManager
+        )
+
+        XCTAssertTrue(fileManager.ejected)
+        XCTAssertFalse(result.isComplete)
+        XCTAssertEqual(result.forgottenExclusions, [], "exclusions the walk didn't reach aren't stale, just unreachable")
+        XCTAssertEqual(result.missing, [], "nor are the books it didn't reach missing")
+        XCTAssertEqual(result.relocations, [])
+        await BookRelocationPlanner.applyRelocations(result, repository: bookRepo)
+        let excluded = try await bookRepo.exclusionSizes(forPaths: [deleted.path])
+        XCTAssertEqual(excluded, [deleted.path: 9_210])
+    }
+
+    func testBookDeletedWhileItsDriveIsEjectedStaysDeleted() async throws {
+        let drive = tempDir.appendingPathComponent("Volumes/Drive", isDirectory: true)
+        let books = drive.appendingPathComponent("Books", isDirectory: true)
+        try await bookRepo.insertWatchedFolder(WatchedFolder(path: books.path, bookmarkData: Data()))
+        try await bookRepo.insertWatchedFolder(WatchedFolder(path: libraryDir.path, bookmarkData: Data()))
+        let dune = try writeFile("Dune.epub", bytes: 9_300, in: books)
+        let book = try await insertBook(at: dune)
+        let gone = try writeFile("Gone.epub", bytes: 9_310)
+        let goneBook = try await insertBook(at: gone)
+        try FileManager.default.removeItem(at: gone)
+        let parked = tempDir.appendingPathComponent("Parked", isDirectory: true)
+        try move(drive, to: parked)
+
+        try await bookRepo.deleteBookExcludingFile(id: book.id)
+        try await bookRepo.deleteBookExcludingFile(id: goneBook.id)
+
+        let recorded = try await bookRepo.exclusionSizes(forPaths: [dune.path, gone.path])
+        XCTAssertEqual(
+            recorded,
+            [dune.path: 9_300],
+            "the row's size stands in while the drive is away; a file gone from a folder that's there needs nothing"
+        )
+        try move(parked, to: drive)
+        let back = await reconcile(books, roots: [books, libraryDir])
+        XCTAssertEqual(back.imports, [], "the drive is back and the book stays deleted")
+    }
+
+    func testRemovingAFolderOnAnEjectedDriveKeepsItsBooksDeleted() async throws {
+        let drive = tempDir.appendingPathComponent("Volumes/Drive", isDirectory: true)
+        let books = drive.appendingPathComponent("Books", isDirectory: true)
+        let sciFi = books.appendingPathComponent("Sci-Fi", isDirectory: true)
+        try await bookRepo.insertWatchedFolder(WatchedFolder(path: books.path, bookmarkData: Data()))
+        try await bookRepo.insertWatchedFolder(WatchedFolder(path: sciFi.path, bookmarkData: Data(), isFullImport: false))
+        let dune = try writeFile("Dune.epub", bytes: 9_320, in: sciFi)
+        try await insertBook(at: dune)
+        let parked = tempDir.appendingPathComponent("Parked", isDirectory: true)
+        try move(drive, to: parked)
+
+        try await bookRepo.deleteBooksInFolder(sciFi.path)
+
+        let recorded = try await bookRepo.exclusionSizes(forPaths: [dune.path])
+        XCTAssertEqual(recorded, [dune.path: 9_320])
+        try move(parked, to: drive)
+        let back = await reconcile(books, roots: [books])
+        XCTAssertEqual(back.imports, [])
+    }
+
+    func testDeleteRecordsTheBooksCurrentPath() async throws {
+        // The caller's copy of the book predates a rename that a reconcile
+        // has applied since; the exclusion is for where the file is now.
+        let original = try writeFile("Dune.epub", bytes: 9_400)
+        let stale = try await insertBook(at: original)
+        let renamed = try move(original, to: url("Dune (1965).epub"))
+        let caughtUp = await reconcile()
+        await BookRelocationPlanner.applyRelocations(caughtUp, repository: bookRepo)
+
+        try await bookRepo.deleteBookExcludingFile(id: stale.id)
+
+        let recorded = try await bookRepo.exclusionSizes(forPaths: [original.path, renamed.path])
+        XCTAssertEqual(recorded, [renamed.path: 9_400])
+        let next = await reconcile()
+        XCTAssertEqual(next.imports, [])
+    }
+
+    func testDeletingABookThatIsAlreadyGoneRecordsNothing() async throws {
+        // A second delete of the same book (queued twice), after the user
+        // has added the file back as a new book, must not exclude it again.
+        let dune = try writeFile("Dune.epub", bytes: 9_410)
+        let book = try await insertBook(at: dune)
+        try await bookRepo.deleteBookExcludingFile(id: book.id)
+        try await bookRepo.clearExclusions(forPaths: [dune.path])
+        let readded = try await insertBook(at: dune)
+
+        try await bookRepo.deleteBookExcludingFile(id: book.id)
+
+        let recorded = try await bookRepo.exclusionSizes(forPaths: [dune.path])
+        XCTAssertEqual(recorded, [:])
+        let kept = try await bookRepo.fetchBook(id: readded.id)
+        XCTAssertNotNil(kept)
+    }
+
+    func testDeletingABookWithACaseOnlyRenamePendingExcludesTheOnDiskSpelling() async throws {
+        let dune = try writeFile("Sci-Fi/dune.epub", bytes: 9_500)
+        try XCTSkipUnless(
+            FileManager.default.fileExists(atPath: url("SCI-FI/DUNE.EPUB").path),
+            "needs a case-insensitive volume"
+        )
+        try await bookRepo.insertWatchedFolder(WatchedFolder(path: libraryDir.path, bookmarkData: Data()))
+        let book = try await insertBook(at: dune)
+        // Renamed while the app was closed; no reconcile has run since, so
+        // the row still says Sci-Fi/dune.epub (which still opens the file).
+        XCTAssertEqual(rename(url("Sci-Fi").path, url("SCI-FI").path), 0)
+        XCTAssertEqual(rename(url("SCI-FI/dune.epub").path, url("SCI-FI/Dune.epub").path), 0)
+
+        try await bookRepo.deleteBookExcludingFile(id: book.id)
+
+        let onDisk = url("SCI-FI/Dune.epub").path
+        let recorded = try await bookRepo.exclusionSizes(forPaths: [onDisk, dune.path])
+        XCTAssertEqual(recorded, [onDisk: 9_500])
+        let result = await reconcile()
+        XCTAssertEqual(result.imports, [], "the walk finds SCI-FI/Dune.epub, which is the excluded path")
+        XCTAssertEqual(result.forgottenExclusions, [])
+    }
+
     func testAddingTheFolderAgainBringsDeletedBooksBack() async throws {
         let dune = try writeFile("Dune.epub", bytes: 5_700)
         try await bookRepo.insertWatchedFolder(WatchedFolder(path: libraryDir.path, bookmarkData: Data()))
-        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: dune))
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: dune).id)
         let stillDeleted = await reconcile()
         XCTAssertEqual(stillDeleted.imports, [])
 
@@ -775,7 +984,7 @@ final class LibraryReconcileTests: XCTestCase {
 
     func testAddingTheFileAgainBringsItBack() async throws {
         let dune = try writeFile("Dune.epub", bytes: 5_800)
-        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: dune))
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: dune).id)
 
         try await bookRepo.clearExclusions(forPaths: [dune.path])
         let result = await reconcile()
@@ -823,7 +1032,7 @@ final class LibraryReconcileTests: XCTestCase {
         XCTAssertEqual(first.relocations.map(\.bookID), [book.id])
         XCTAssertEqual(first.imports, [deletedOnMain.path])
         await BookRelocationPlanner.applyRelocations(first, repository: bookRepo)
-        try await bookRepo.seedExclusions(forFolder: folder.id, paths: first.imports)
+        try await bookRepo.seedExclusions(forFolder: folder.id, paths: first.imports, walkedWholeFolder: first.isComplete)
 
         try await assertUserDataIntact(for: book, nowAt: fixed)
         let seeded = try await bookRepo.fetchAllWatchedFolders()
@@ -837,14 +1046,87 @@ final class LibraryReconcileTests: XCTestCase {
         XCTAssertEqual(readded.imports, [deletedOnMain.path])
     }
 
+    func testUpgradeSeedWaitsForAWalkThatReachesTheFolder() async throws {
+        // The folder passed the launch check but was gone (drive ejected) by
+        // the time its reconcile ran. Clearing the flag then would let the
+        // books deleted before the upgrade come back once the drive does.
+        let deletedOnMain = try writeFile("Dune.epub", bytes: 9_600)
+        let folder = WatchedFolder(path: libraryDir.path, bookmarkData: Data(), needsExclusionSeed: true)
+        try await bookRepo.insertWatchedFolder(folder)
+        let parked = tempDir.appendingPathComponent("Parked", isDirectory: true)
+        try move(libraryDir, to: parked)
+
+        let offline = await reconcile()
+        XCTAssertFalse(offline.isComplete)
+        let seededOffline = try await bookRepo.seedExclusions(
+            forFolder: folder.id,
+            paths: offline.imports,
+            walkedWholeFolder: offline.isComplete
+        )
+        XCTAssertTrue(seededOffline)
+        let stillFlagged = try await bookRepo.fetchAllWatchedFolders().map(\.needsExclusionSeed)
+        XCTAssertEqual(stillFlagged, [true], "the seed is still owed")
+
+        try move(parked, to: libraryDir)
+        let online = await reconcile()
+        XCTAssertTrue(online.isComplete)
+        XCTAssertEqual(online.imports, [deletedOnMain.path])
+        try await bookRepo.seedExclusions(forFolder: folder.id, paths: online.imports, walkedWholeFolder: online.isComplete)
+        let flags = try await bookRepo.fetchAllWatchedFolders().map(\.needsExclusionSeed)
+        XCTAssertEqual(flags, [false])
+        let next = await reconcile()
+        XCTAssertEqual(next.imports, [], "a book deleted before the upgrade stays deleted")
+    }
+
+    func testUpgradeSeedKeepsTheFlagAfterAWalkThatLostTheDrive() async throws {
+        try writeFile("Dune.epub", bytes: 9_610)
+        let folder = WatchedFolder(path: libraryDir.path, bookmarkData: Data(), needsExclusionSeed: true)
+        try await bookRepo.insertWatchedFolder(folder)
+
+        let fileManager = EjectingFileManager(ejecting: libraryDir, to: tempDir.appendingPathComponent("Parked"))
+        let partial = await BookRelocationPlanner.plan(
+            reconcilingFolder: libraryDir.path,
+            repository: bookRepo,
+            watchedRoots: [libraryDir.path],
+            fileManager: fileManager
+        )
+        XCTAssertTrue(fileManager.ejected)
+        XCTAssertFalse(partial.isComplete)
+        try await bookRepo.seedExclusions(forFolder: folder.id, paths: partial.imports, walkedWholeFolder: partial.isComplete)
+
+        let flags = try await bookRepo.fetchAllWatchedFolders().map(\.needsExclusionSeed)
+        XCTAssertEqual(flags, [true], "the walk didn't see the folder, so the next reconcile seeds again")
+    }
+
+    func testAddFolderDuringTheFirstReconcileCancelsTheSeed() async throws {
+        // Add Folder clears the flag and asks for every file. A launch
+        // reconcile that planned before that must not record them as deleted.
+        let file = try writeFile("Dune.epub", bytes: 9_630)
+        let folder = WatchedFolder(path: libraryDir.path, bookmarkData: Data(), needsExclusionSeed: true)
+        try await bookRepo.insertWatchedFolder(folder)
+        let launch = await reconcile()
+        XCTAssertEqual(launch.imports, [file.path])
+
+        _ = try await bookRepo.registerFullImportFolder(path: libraryDir.path, bookmarkData: Data())
+        let seeded = try await bookRepo.seedExclusions(
+            forFolder: folder.id,
+            paths: launch.imports,
+            walkedWholeFolder: launch.isComplete
+        )
+
+        XCTAssertFalse(seeded, "AppState imports the files instead")
+        let excluded = try await bookRepo.exclusionSizes(forPaths: [file.path])
+        XCTAssertEqual(excluded, [:])
+    }
+
     // MARK: - Removing folders
 
     func testRemovingAFolderForgetsOnlyItsExclusions() async throws {
         let archiveDir = tempDir.appendingPathComponent("Archive", isDirectory: true)
         let inside = try writeFile("Dune.epub", bytes: 5_900)
         let outside = try writeFile("Dune.epub", bytes: 5_900, in: archiveDir)
-        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: inside))
-        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: outside))
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: inside).id)
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: outside).id)
 
         try await bookRepo.deleteBooksInFolder(libraryDir.path)
 
@@ -860,8 +1142,8 @@ final class LibraryReconcileTests: XCTestCase {
         let nestedBook = try await insertBookWithUserData(at: try writeFile("Nested/Inner.epub", bytes: 8_400))
         let outerDeleted = try writeFile("Gone.epub", bytes: 8_500)
         let nestedDeleted = try writeFile("Nested/Deleted.epub", bytes: 8_600)
-        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: outerDeleted))
-        try await bookRepo.deleteBookExcludingFile(try await insertBook(at: nestedDeleted))
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: outerDeleted).id)
+        try await bookRepo.deleteBookExcludingFile(id: try await insertBook(at: nestedDeleted).id)
 
         let count = try await bookRepo.countBooks(inFolder: libraryDir.path)
         XCTAssertEqual(count, 1, "the confirmation counts only what will go")
@@ -1059,6 +1341,29 @@ private final class BookCommitCounter: TransactionObserver, @unchecked Sendable 
         lock.lock()
         changedBooks = false
         lock.unlock()
+    }
+}
+
+/// A drive ejected right after the planner checked it was there: the
+/// first time it's asked whether `folder` is a directory it says yes, then
+/// moves the folder away, so the walk that follows finds none of it.
+private final class EjectingFileManager: FileManager, @unchecked Sendable {
+    private let folder: URL
+    private let parkedAt: URL
+    private(set) var ejected = false
+
+    init(ejecting folder: URL, to parkedAt: URL) {
+        self.folder = folder
+        self.parkedAt = parkedAt
+        super.init()
+    }
+
+    override func fileExists(atPath path: String, isDirectory: UnsafeMutablePointer<ObjCBool>?) -> Bool {
+        let exists = super.fileExists(atPath: path, isDirectory: isDirectory)
+        if exists, !ejected, path == folder.path {
+            ejected = (try? FileManager.default.moveItem(at: folder, to: parkedAt)) != nil
+        }
+        return exists
     }
 }
 
